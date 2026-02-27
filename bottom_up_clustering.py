@@ -34,6 +34,7 @@ OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring -
 SHARD_PREFIX = "bodynorm"
 A_EMB_FILE = "A_embeddings.npz"
 A_INDEX_FILE = "C_candidates_index.parquet"  # row-aligned with A embeddings from original pipeline
+LATE_ROWS_FILE = "late_arrivals_body_norm.csv"  # optional; written by embed_late_arrivals.py
 
 GUIDED_TOPICS_JSON = "guided_topics.json"  # create/edit this file in OUTPUT_DIR
 USE_BERTOPIC_GUIDED = True
@@ -126,6 +127,64 @@ def load_aligned_index(outdir: Path) -> pd.DataFrame:
         raise FileNotFoundError(f"Missing {idx_path}. This is required to map embeddings to text/meta.")
     return pd.read_parquet(idx_path)
 
+
+
+
+def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
+    return pd.DataFrame({
+        "body_norm": [""] * n_rows,
+        "createdAt": ["unknown"] * n_rows,
+        "age_group": ["ukjent"] * n_rows,
+        "gender_std": ["ikke oppgitt"] * n_rows,
+        "source": ["auto_filled"] * n_rows,
+    })
+
+
+def reconcile_index_length(outdir: Path, idx: pd.DataFrame, n_embs: int) -> pd.DataFrame:
+    """Make index length match embeddings length for late-arrival shards.
+
+    If embeddings are longer than index, append rows from late_arrivals_body_norm.csv when available.
+    If still short, pad remaining rows with unknown metadata.
+    """
+    n_idx = len(idx)
+    if n_idx == n_embs:
+        return idx
+
+    if n_idx > n_embs:
+        raise ValueError(
+            f"Index longer than embeddings: index={n_idx}, embeddings={n_embs}. "
+            "Check files and rebuild alignment."
+        )
+
+    missing = n_embs - n_idx
+    parts = [idx.copy()]
+
+    late_path = outdir / LATE_ROWS_FILE
+    if late_path.exists() and missing > 0:
+        late = pd.read_csv(late_path, dtype=str).fillna("")
+        if "body_norm" not in late.columns:
+            raise ValueError(f"{LATE_ROWS_FILE} exists but has no body_norm column.")
+        take = late.iloc[:missing][["body_norm"]].copy()
+        take["createdAt"] = "unknown"
+        take["age_group"] = "ukjent"
+        take["gender_std"] = "ikke oppgitt"
+        take["source"] = "late_arrivals_body_norm"
+        parts.append(take)
+        missing -= len(take)
+
+    if missing > 0:
+        warnings.warn(
+            f"Index is still short by {missing} rows after reading {LATE_ROWS_FILE}; "
+            "filling remaining rows with placeholders."
+        )
+        parts.append(_empty_meta_frame(missing))
+
+    out = pd.concat(parts, ignore_index=True)
+    if len(out) != n_embs:
+        raise ValueError(
+            f"Failed to align index length: got {len(out)} expected {n_embs}."
+        )
+    return out
 
 def ensure_strat_cols(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
@@ -344,8 +403,7 @@ def main() -> None:
     print("[load] embeddings + index")
     embs = load_all_embeddings(outdir, SHARD_PREFIX)
     idx = load_aligned_index(outdir)
-    if len(embs) != len(idx):
-        raise ValueError(f"Length mismatch: embeddings={len(embs)} index={len(idx)}. Rebuild index/embeddings alignment first.")
+    idx = reconcile_index_length(outdir, idx, len(embs))
     if "body_norm" not in idx.columns:
         raise ValueError("Index is missing body_norm column; required for keywords and export.")
     print(f"[load] N={len(embs)} dim={embs.shape[1]}")
@@ -426,6 +484,7 @@ def main() -> None:
         "files": {
             "embeddings": str(outdir / A_EMB_FILE),
             "index": str(outdir / A_INDEX_FILE),
+            "late_rows_file": str(outdir / LATE_ROWS_FILE),
             "guided_topics_json": str(outdir / GUIDED_TOPICS_JSON),
         },
         "sampling": {"size": SAMPLE_SIZE, "min_per_stratum": MIN_PER_STRATUM, "seed": SAMPLE_RANDOM_STATE},
