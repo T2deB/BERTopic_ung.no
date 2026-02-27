@@ -40,7 +40,7 @@ GUIDED_TOPICS_JSON = "guided_topics.json"  # create/edit this file in OUTPUT_DIR
 USE_BERTOPIC_GUIDED = True
 
 # --- Sampling for clustering ---
-SAMPLE_SIZE = 180_000
+SAMPLE_SIZE = 120_000
 MIN_PER_STRATUM = 50
 SAMPLE_RANDOM_STATE = 42
 
@@ -56,6 +56,7 @@ HDBSCAN_MIN_CLUSTER_SIZE = 100
 HDBSCAN_MIN_SAMPLES = 30
 HDBSCAN_CLUSTER_SELECTION_EPSILON = 0.0
 HDBSCAN_CLUSTER_SELECTION_METHOD = "eom"
+HDBSCAN_CORE_DIST_N_JOBS = 1
 
 # --- Assignment thresholds ---
 ASSIGN_MIN_SIM = 0.44
@@ -357,6 +358,7 @@ def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
         cluster_selection_method=HDBSCAN_CLUSTER_SELECTION_METHOD,
         metric="euclidean",
         prediction_data=True,
+        core_dist_n_jobs=HDBSCAN_CORE_DIST_N_JOBS,
     )
     return clusterer.fit_predict(sample_umap)
 
@@ -383,6 +385,7 @@ def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarra
         cluster_selection_method=HDBSCAN_CLUSTER_SELECTION_METHOD,
         metric="euclidean",
         prediction_data=True,
+        core_dist_n_jobs=HDBSCAN_CORE_DIST_N_JOBS,
     )
     topic_model = BERTopic(
         embedding_model=None,
@@ -500,6 +503,7 @@ def main() -> None:
             "min_samples": HDBSCAN_MIN_SAMPLES,
             "cluster_selection_epsilon": HDBSCAN_CLUSTER_SELECTION_EPSILON,
             "cluster_selection_method": HDBSCAN_CLUSTER_SELECTION_METHOD,
+            "core_dist_n_jobs": HDBSCAN_CORE_DIST_N_JOBS,
         },
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
         "guided_topics_loaded": len(seed_topic_list),
