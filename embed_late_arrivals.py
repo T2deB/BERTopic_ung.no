@@ -16,7 +16,7 @@ import argparse
 import json
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -27,36 +27,6 @@ DEFAULT_BATCH_SIZE = 64
 DEFAULT_MAX_SEQ_LEN = 256
 DEFAULT_SHARD_PREFIX = "bodynorm"
 DEFAULT_SHARD_SIZE = 10_000
-
-
-def infer_default_paths(cwd: Path) -> Tuple[Path | None, Path | None]:
-    """Best-effort inference so the script can run without CLI args.
-
-    Assumes the common layout:
-      Positron_project/
-        data/
-        outputs/
-        BERTopic_ung.no/embed_late_arrivals.py
-    """
-    candidates = [cwd, *cwd.parents]
-    project_root = None
-    for c in candidates:
-        if c.name == "Positron_project":
-            project_root = c
-            break
-    if project_root is None:
-        return None, None
-
-    data_dir = project_root / "data"
-    output_dir = project_root / "outputs"
-    if not data_dir.exists() or not output_dir.exists():
-        return None, None
-
-    csvs = sorted(data_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
-    if not csvs:
-        return None, output_dir
-
-    return csvs[-1], output_dir
 
 
 def normalize_text(s: str) -> str:
@@ -123,8 +93,8 @@ def parse_existing_shard_endings(output_dir: Path, shard_prefix: str) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Embed late-arriving data and append shards.")
-    parser.add_argument("--late-csv", help="Path to the late-arriving CSV file.")
-    parser.add_argument("--output-dir", help="Path to existing outputs directory.")
+    parser.add_argument("--late-csv", required=True, help="Path to the late-arriving CSV file.")
+    parser.add_argument("--output-dir", required=True, help="Path to existing outputs directory.")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max-seq-len", type=int, default=DEFAULT_MAX_SEQ_LEN)
@@ -132,22 +102,9 @@ def main() -> None:
     parser.add_argument("--shard-size", type=int, default=DEFAULT_SHARD_SIZE)
     args = parser.parse_args()
 
-    inferred_csv, inferred_out = infer_default_paths(Path.cwd())
-
-    late_csv_arg = args.late_csv or (str(inferred_csv) if inferred_csv else None)
-    output_dir_arg = args.output_dir or (str(inferred_out) if inferred_out else None)
-    if late_csv_arg is None or output_dir_arg is None:
-        parser.error(
-            "Missing required arguments. Provide --late-csv and --output-dir, "
-            "or run from within a Positron_project tree containing data/ and outputs/."
-        )
-
-    late_csv = Path(late_csv_arg)
-    output_dir = Path(output_dir_arg)
+    late_csv = Path(args.late_csv)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.late_csv is None or args.output_dir is None:
-        print(f"Using inferred paths -> late_csv: {late_csv} | output_dir: {output_dir}")
 
     if not late_csv.exists():
         raise FileNotFoundError(f"Late CSV not found: {late_csv}")
