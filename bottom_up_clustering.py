@@ -356,6 +356,18 @@ def ctfi_df(texts_per_cluster: Dict[int, List[str]], ngram_range=(1, 2), min_df=
     return pd.DataFrame(rows, columns=["cluster_id", "term", "score", "rank"])
 
 
+
+
+def top_terms_per_cluster(kw_df: pd.DataFrame, top_k: int) -> Dict[int, str]:
+    if kw_df is None or kw_df.empty:
+        return {}
+    return (
+        kw_df.sort_values(["cluster_id", "rank"])
+        .groupby("cluster_id")["term"]
+        .apply(lambda s: ", ".join(s.tolist()[:top_k]))
+        .to_dict()
+    )
+
 def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
     um = umap.UMAP(
         n_neighbors=UMAP_N_NEIGHBORS,
@@ -480,17 +492,25 @@ def main() -> None:
     }
 
     if texts_by_cluster:
+        # Keep legacy mixed ngram output for backward compatibility
         kw = ctfi_df(texts_by_cluster, ngram_range=NGRAM_RANGE, min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
+
+        # New: explicit unigram and bigram outputs
+        kw_uni = ctfi_df(texts_by_cluster, ngram_range=(1, 1), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
+        kw_bi = ctfi_df(texts_by_cluster, ngram_range=(2, 2), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
     else:
         kw = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
+        kw_uni = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
+        kw_bi = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
+
     kw.to_csv(outdir / "clusters_keywords.csv", index=False, encoding="utf-8")
+    kw_uni.to_csv(outdir / "clusters_keywords_unigrams.csv", index=False, encoding="utf-8")
+    kw_bi.to_csv(outdir / "clusters_keywords_bigrams.csv", index=False, encoding="utf-8")
 
     sizes = valid.groupby("cluster_id").size().rename("size").reset_index()
-    top_terms = (
-        kw.sort_values(["cluster_id", "rank"]).groupby("cluster_id")["term"].apply(lambda s: ", ".join(s.tolist()[:TOP_K_TERMS])).to_dict()
-        if len(kw)
-        else {}
-    )
+    top_terms = top_terms_per_cluster(kw, TOP_K_TERMS)
+    top_unigrams = top_terms_per_cluster(kw_uni, TOP_K_TERMS)
+    top_bigrams = top_terms_per_cluster(kw_bi, TOP_K_TERMS)
     catalog_rows = []
     for _, r in sizes.iterrows():
         cid = int(r["cluster_id"])
@@ -500,6 +520,8 @@ def main() -> None:
             "cluster_id": cid,
             "size": int(r["size"]),
             "top_terms": top_terms.get(cid, ""),
+            "top_unigrams": top_unigrams.get(cid, ""),
+            "top_bigrams": top_bigrams.get(cid, ""),
             "exemplar_text": str(exemplar)[:400].replace("\n", " "),
         })
     pd.DataFrame(catalog_rows).sort_values("size", ascending=False).to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
@@ -510,6 +532,9 @@ def main() -> None:
             "index": str(outdir / A_INDEX_FILE),
             "late_rows_file": str(outdir / LATE_ROWS_FILE),
             "guided_topics_json": str(outdir / GUIDED_TOPICS_JSON),
+            "clusters_keywords": str(outdir / "clusters_keywords.csv"),
+            "clusters_keywords_unigrams": str(outdir / "clusters_keywords_unigrams.csv"),
+            "clusters_keywords_bigrams": str(outdir / "clusters_keywords_bigrams.csv"),
         },
         "sampling": {"size": SAMPLE_SIZE, "min_per_stratum": MIN_PER_STRATUM, "seed": SAMPLE_RANDOM_STATE},
         "umap": {
