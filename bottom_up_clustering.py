@@ -187,6 +187,22 @@ def reconcile_index_length(outdir: Path, idx: pd.DataFrame, n_embs: int) -> pd.D
         )
     return out
 
+
+
+def normalize_export_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize mixed object columns before Parquet export (pyarrow-safe)."""
+    out = df.copy()
+    # Force commonly mixed metadata columns to string
+    for col in ["createdAt", "age_group", "gender_std", "body_norm", "source"]:
+        if col in out.columns:
+            out[col] = out[col].astype(str)
+
+    # Any remaining object dtype columns can still contain mixed Python types
+    for col in out.select_dtypes(include=["object"]).columns:
+        out[col] = out[col].astype(str)
+
+    return out
+
 def ensure_strat_cols(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
     if "createdAt" not in x.columns:
@@ -445,7 +461,12 @@ def main() -> None:
     out_assign["cluster_id"] = labels_all
     out_assign["cluster_sim"] = sim_all
     out_assign["cluster_margin"] = margin_all
-    out_assign.to_parquet(outdir / "A_cluster_assignments.parquet", index=False)
+    out_assign = normalize_export_dtypes(out_assign)
+    try:
+        out_assign.to_parquet(outdir / "A_cluster_assignments.parquet", index=False)
+    except Exception as e:
+        warnings.warn(f"Parquet export failed ({e}); writing CSV fallback.")
+        out_assign.to_csv(outdir / "A_cluster_assignments.csv", index=False, encoding="utf-8")
 
     unassigned = out_assign[out_assign["cluster_id"] < 0].copy()
     unassigned = unassigned.sort_values(["cluster_sim", "cluster_margin"], ascending=[False, True])
