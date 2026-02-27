@@ -1,0 +1,12 @@
+{
+  "topics": [
+    {
+      "label": "sleep",
+      "keywords": ["søvn", "sove", "trøtt", "døgnrytme"]
+    },
+    {
+      "label": "school_pressure",
+      "keywords": ["skole", "karakter", "eksamen", "lekser", "stress"]
+    }
+  ]
+}
