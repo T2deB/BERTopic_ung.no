@@ -1,0 +1,76 @@
+Project handover notes (BERTopic_ung.no)
+======================================
+
+What has been completed
+-----------------------
+1) Late-arriving data embeddings
+   - Script: embed_late_arrivals.py
+   - Outcome: late rows were embedded and appended as shard files in outputs/.
+   - Trace files in outputs/: late_arrivals_body_norm.csv, late_arrivals_embedding_report.json
+
+2) Bottom-up clustering run
+   - Script: bottom_up_clustering.py
+   - Recent run completed clustering and assignment.
+   - Outputs include:
+     - A_cluster_assignments.parquet (or CSV fallback)
+     - A_unassigned_questions.csv
+     - clusters_keywords.csv (mixed ngram)
+     - clusters_keywords_unigrams.csv (new)
+     - clusters_keywords_bigrams.csv (new)
+     - clusters_catalog.csv (now includes top_unigrams + top_bigrams columns)
+     - clustering_run_params.json
+
+3) Review package generator
+   - Script: prepare_cluster_review.py
+   - Creates folder-based review structure for manual labeling:
+     - cluster_review/cluster_XXXX/questions.csv
+     - cluster_review/cluster_XXXX/sample_for_labeling.csv
+     - cluster_review/unclustered/questions.csv
+     - cluster_review/unclustered/sample_for_review.csv
+     - cluster_review/labels_template.csv
+
+Recommended next steps when returning
+-------------------------------------
+A) Inspect cluster quality
+   1. Open clusters_catalog.csv
+      - Focus on: cluster size, top_unigrams, top_bigrams, exemplar_text.
+   2. Open clusters_keywords_unigrams.csv and clusters_keywords_bigrams.csv
+      - Confirm top terms are coherent within each cluster.
+
+B) Run review packaging
+   Command:
+   python prepare_cluster_review.py --output-dir "<YOUR_OUTPUT_DIR>"
+
+   Then inspect:
+   - cluster_review/cluster_XXXX/sample_for_labeling.csv
+   - cluster_review/unclustered/sample_for_review.csv
+
+C) Labeling workflow
+   1. Fill cluster_review/labels_template.csv:
+      - label_name
+      - label_description
+      - merge_into_cluster_id (optional)
+      - drop_cluster (optional)
+   2. Note recurring themes in unclustered rows.
+   3. Add those as seed topics in guided_topics.json for the next run.
+
+D) If too many unassigned rows
+   - Relax thresholds slightly and rerun clustering:
+     - ASSIGN_MIN_SIM: try 0.42 (from 0.44)
+     - ASSIGN_MIN_MARGIN: try 0.01 (from 0.015)
+   - Keep only one change per run to compare impact clearly.
+
+E) Keep run logs
+   - Save clustering_run_params.json per run (copy/rename with date)
+   - Keep a short run diary: sample size, thresholds, % unassigned, notes.
+
+Quick commands
+--------------
+1) Clustering
+   python bottom_up_clustering.py
+
+2) Review package
+   python prepare_cluster_review.py --output-dir "<YOUR_OUTPUT_DIR>"
+
+3) Late arrivals embedding (if new data arrives)
+   python embed_late_arrivals.py --late-csv "<LATE_CSV_PATH>" --output-dir "<YOUR_OUTPUT_DIR>"
