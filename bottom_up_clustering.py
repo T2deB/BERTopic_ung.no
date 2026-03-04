@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Bottom-up clustering on all embeddings with optional guided seeding.
 
-Highlights:
-- Loads full embedding set from A_embeddings.npz or stitches all shard files.
-- Uses C_candidates_index.parquet as row-aligned index for all embeddings.
-- Optional BERTopic guided fitting from external JSON seed file.
-- Uses similarity + margin thresholds when assigning all rows to centroids.
-- Exports explicit unassigned/noise rows for review.
+Now supports segmented runs:
+- boys 13-15
+- boys 16-20
+- girls 13-15
+- girls 16-20
+
+Outputs are written per segment under: <OUTPUT_DIR>/segments/<segment_name>/
 """
 
 from __future__ import annotations
@@ -28,41 +29,52 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.preprocessing import normalize
 
 # ---------------------------
-# CONFIG (edit here)
+# CONFIG
 # ---------------------------
 OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\outputs"
 SHARD_PREFIX = "bodynorm"
 A_EMB_FILE = "A_embeddings.npz"
-A_INDEX_FILE = "C_candidates_index.parquet"  # row-aligned with A embeddings from original pipeline
-LATE_ROWS_FILE = "late_arrivals_body_norm.csv"  # optional; written by embed_late_arrivals.py
+A_INDEX_FILE = "C_candidates_index.parquet"
+LATE_ROWS_FILE = "late_arrivals_body_norm.csv"
 
-GUIDED_TOPICS_JSON = "guided_topics.json"  # create/edit this file in OUTPUT_DIR
+GUIDED_TOPICS_JSON = "guided_topics.json"
 USE_BERTOPIC_GUIDED = True
 
-# --- Sampling for clustering ---
+RUN_SEGMENTED = True
+SEGMENT_OUTPUT_SUBDIR = "segments"
+
+# NOTE: if exact age column is missing, 13-15 is approximated using age_group == "13-16"
+SEGMENTS = [
+    {"name": "boys_13_15", "gender": "m", "age_min": 13, "age_max": 15},
+    {"name": "boys_16_20", "gender": "m", "age_min": 16, "age_max": 20},
+    {"name": "girls_13_15", "gender": "k", "age_min": 13, "age_max": 15},
+    {"name": "girls_16_20", "gender": "k", "age_min": 16, "age_max": 20},
+]
+
+# Sampling
 SAMPLE_SIZE = 120_000
 MIN_PER_STRATUM = 50
 SAMPLE_RANDOM_STATE = 42
 
-# --- UMAP params ---
+# UMAP
 UMAP_N_NEIGHBORS = 30
 UMAP_MIN_DIST = 0.08
 UMAP_N_COMPONENTS = 15
 UMAP_METRIC = "cosine"
 UMAP_RANDOM_STATE = 42
 
-# --- HDBSCAN params ---
+# HDBSCAN
 HDBSCAN_MIN_CLUSTER_SIZE = 100
 HDBSCAN_MIN_SAMPLES = 30
 HDBSCAN_CLUSTER_SELECTION_EPSILON = 0.0
 HDBSCAN_CLUSTER_SELECTION_METHOD = "eom"
 HDBSCAN_CORE_DIST_N_JOBS = 1
 
-# --- Assignment thresholds ---
+# Assignment thresholds
 ASSIGN_MIN_SIM = 0.44
-ASSIGN_MIN_MARGIN = 0.015
+ASSIGN_MIN_MARGIN = 0.025
 
-# --- c-TF-IDF params ---
+# c-TF-IDF
 NGRAM_RANGE = (1, 2)
 MIN_DF = 10
 TOP_K_TERMS = 15
@@ -78,7 +90,6 @@ CUSTOM_STOP = {
     "jeg", "meg", "min", "mitt", "mine", "vi", "oss", "vår", "vårt", "våre",
     "du", "deg", "din", "ditt", "dine", "dere", "deres", "han", "hun", "hen", "de", "dem", "man", "en", "den", "det", "dette", "disse", "slik", "sånn",
 }
-
 try:
     STOP_WORDS = set(stopwords.words("norwegian"))
 except Exception:
@@ -87,9 +98,6 @@ STOP_WORDS |= CUSTOM_STOP
 STOP_WORDS = sorted(STOP_WORDS)
 
 
-# ---------------------------
-# utils
-# ---------------------------
 def l2norm(x: np.ndarray) -> np.ndarray:
     return normalize(x, norm="l2", axis=1, copy=False)
 
@@ -125,10 +133,8 @@ def load_all_embeddings(outdir: Path, shard_prefix: str) -> np.ndarray:
 def load_aligned_index(outdir: Path) -> pd.DataFrame:
     idx_path = outdir / A_INDEX_FILE
     if not idx_path.exists():
-        raise FileNotFoundError(f"Missing {idx_path}. This is required to map embeddings to text/meta.")
+        raise FileNotFoundError(f"Missing {idx_path}")
     return pd.read_parquet(idx_path)
-
-
 
 
 def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
@@ -142,20 +148,11 @@ def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
 
 
 def reconcile_index_length(outdir: Path, idx: pd.DataFrame, n_embs: int) -> pd.DataFrame:
-    """Make index length match embeddings length for late-arrival shards.
-
-    If embeddings are longer than index, append rows from late_arrivals_body_norm.csv when available.
-    If still short, pad remaining rows with unknown metadata.
-    """
     n_idx = len(idx)
     if n_idx == n_embs:
         return idx
-
     if n_idx > n_embs:
-        raise ValueError(
-            f"Index longer than embeddings: index={n_idx}, embeddings={n_embs}. "
-            "Check files and rebuild alignment."
-        )
+        raise ValueError(f"Index longer than embeddings: index={n_idx}, embeddings={n_embs}")
 
     missing = n_embs - n_idx
     parts = [idx.copy()]
@@ -164,7 +161,7 @@ def reconcile_index_length(outdir: Path, idx: pd.DataFrame, n_embs: int) -> pd.D
     if late_path.exists() and missing > 0:
         late = pd.read_csv(late_path, dtype=str).fillna("")
         if "body_norm" not in late.columns:
-            raise ValueError(f"{LATE_ROWS_FILE} exists but has no body_norm column.")
+            raise ValueError(f"{LATE_ROWS_FILE} exists but has no body_norm column")
         take = late.iloc[:missing][["body_norm"]].copy()
         take["createdAt"] = "unknown"
         take["age_group"] = "ukjent"
@@ -174,46 +171,31 @@ def reconcile_index_length(outdir: Path, idx: pd.DataFrame, n_embs: int) -> pd.D
         missing -= len(take)
 
     if missing > 0:
-        warnings.warn(
-            f"Index is still short by {missing} rows after reading {LATE_ROWS_FILE}; "
-            "filling remaining rows with placeholders."
-        )
+        warnings.warn(f"Index short by {missing}; filling with placeholders")
         parts.append(_empty_meta_frame(missing))
 
     out = pd.concat(parts, ignore_index=True)
     if len(out) != n_embs:
-        raise ValueError(
-            f"Failed to align index length: got {len(out)} expected {n_embs}."
-        )
+        raise ValueError(f"Failed to align index length: got {len(out)} expected {n_embs}")
     return out
-
 
 
 def normalize_export_dtypes(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize mixed object columns before Parquet export (pyarrow-safe)."""
     out = df.copy()
-    # Force commonly mixed metadata columns to string
     for col in ["createdAt", "age_group", "gender_std", "body_norm", "source"]:
         if col in out.columns:
             out[col] = out[col].astype(str)
-
-    # Any remaining object dtype columns can still contain mixed Python types
-    for col in out.select_dtypes(include=["object"]).columns:
+    for col in out.select_dtypes(include=["object", "string"]).columns:
         out[col] = out[col].astype(str)
-
     return out
+
 
 def ensure_strat_cols(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
-    if "createdAt" not in x.columns:
-        x["createdAt"] = "unknown"
-    if "age_group" not in x.columns:
-        x["age_group"] = "ukjent"
-    if "gender_std" not in x.columns:
-        x["gender_std"] = "ikke oppgitt"
-    x["createdAt"] = x["createdAt"].astype(str)
-    x["age_group"] = x["age_group"].astype(str)
-    x["gender_std"] = x["gender_std"].astype(str)
+    for col, default in [("createdAt", "unknown"), ("age_group", "ukjent"), ("gender_std", "ikke oppgitt")]:
+        if col not in x.columns:
+            x[col] = default
+        x[col] = x[col].astype(str)
     return x
 
 
@@ -247,52 +229,34 @@ def stratified_sample_index(df: pd.DataFrame, n_target: int, min_per_stratum: in
     chosen = []
     keyed = sdf.reset_index()
     for _, row in strata.iterrows():
-        m = (
-            (keyed["year"] == row["year"])
-            & (keyed["age_group"] == row["age_group"])
-            & (keyed["gender_std"] == row["gender_std"])
-        )
+        m = (keyed["year"] == row["year"]) & (keyed["age_group"] == row["age_group"]) & (keyed["gender_std"] == row["gender_std"])
         idxs = keyed.loc[m, "index"].to_numpy()
         k = int(row["take"])
-        if k <= 0:
-            continue
-        chosen.append(idxs if len(idxs) <= k else rng.choice(idxs, size=k, replace=False))
+        if k > 0:
+            chosen.append(idxs if len(idxs) <= k else rng.choice(idxs, size=k, replace=False))
 
-    if not chosen:
-        return np.arange(0)
-    return np.unique(np.concatenate(chosen))
+    return np.unique(np.concatenate(chosen)) if chosen else np.arange(0)
 
 
 def load_guided_topics(path: Path) -> Tuple[List[str], List[List[str]]]:
     if not path.exists():
-        template = {
-            "topics": [
-                {
-                    "label": "example_sleep",
-                    "keywords": ["søvn", "sove", "trøtt", "døgnrytme"],
-                }
-            ]
-        }
+        template = {"topics": [{"label": "example_sleep", "keywords": ["søvn", "sove", "trøtt", "døgnrytme"]}]}
         path.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
         return [], []
-
     raw = json.loads(path.read_text(encoding="utf-8"))
-    topics = raw.get("topics", [])
     labels, seed_topic_list = [], []
-    for t in topics:
+    for t in raw.get("topics", []):
         label = str(t.get("label", "")).strip()
         kws = [str(x).strip().lower() for x in t.get("keywords", []) if str(x).strip()]
-        if not label or not kws:
-            continue
-        labels.append(label)
-        seed_topic_list.append(kws)
+        if label and kws:
+            labels.append(label)
+            seed_topic_list.append(kws)
     return labels, seed_topic_list
 
 
 def compute_centroids(embs: np.ndarray, labels: np.ndarray) -> Dict[int, np.ndarray]:
-    uniq = np.unique(labels[labels >= 0])
-    centroids: Dict[int, np.ndarray] = {}
-    for lab in uniq:
+    centroids = {}
+    for lab in np.unique(labels[labels >= 0]):
         idx = np.where(labels == lab)[0]
         c = embs[idx].mean(axis=0, keepdims=True)
         centroids[int(lab)] = l2norm(c)[0]
@@ -303,30 +267,22 @@ def assign_all(embs: np.ndarray, centroids: Dict[int, np.ndarray], min_sim: floa
     if not centroids:
         n = len(embs)
         return np.full(n, -1, dtype=int), np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
-
     labs = sorted(centroids.keys())
     C = np.vstack([centroids[k] for k in labs])
     E = l2norm(embs.copy())
     sims = E @ C.T
     best_k = sims.argmax(axis=1)
     best_sim = sims.max(axis=1)
-
-    if sims.shape[1] > 1:
-        second_sim = np.partition(sims, -2, axis=1)[:, -2]
-    else:
-        second_sim = np.zeros_like(best_sim)
+    second_sim = np.partition(sims, -2, axis=1)[:, -2] if sims.shape[1] > 1 else np.zeros_like(best_sim)
     margin = best_sim - second_sim
-
     out_labels = np.array([labs[k] for k in best_k], dtype=int)
-    reject = (best_sim < float(min_sim)) | (margin < float(min_margin))
-    out_labels[reject] = -1
+    out_labels[(best_sim < float(min_sim)) | (margin < float(min_margin))] = -1
     return out_labels, best_sim.astype(np.float32), margin.astype(np.float32)
 
 
 def ctfi_df(texts_per_cluster: Dict[int, List[str]], ngram_range=(1, 2), min_df=3, stop_words=None, top_k=15) -> pd.DataFrame:
     clusters = sorted(texts_per_cluster.keys())
     docs = [" ".join(texts_per_cluster[cid]) for cid in clusters]
-
     vect = CountVectorizer(
         ngram_range=ngram_range,
         min_df=min_df,
@@ -339,7 +295,6 @@ def ctfi_df(texts_per_cluster: Dict[int, List[str]], ngram_range=(1, 2), min_df=
     X = vect.fit_transform(docs)
     vocab = vect.get_feature_names_out()
     print(f"[ctfidf] vocab={len(vocab)} min_df={min_df} ngram={ngram_range} stop_words={len(stop_words) if stop_words else 0}")
-
     tf = normalize(X, norm="l1", axis=1, copy=False)
     df = (X > 0).sum(axis=0).A1
     idf = np.log((len(clusters) + 1) / (1 + df)) + 1.0
@@ -356,17 +311,11 @@ def ctfi_df(texts_per_cluster: Dict[int, List[str]], ngram_range=(1, 2), min_df=
     return pd.DataFrame(rows, columns=["cluster_id", "term", "score", "rank"])
 
 
-
-
 def top_terms_per_cluster(kw_df: pd.DataFrame, top_k: int) -> Dict[int, str]:
     if kw_df is None or kw_df.empty:
         return {}
-    return (
-        kw_df.sort_values(["cluster_id", "rank"])
-        .groupby("cluster_id")["term"]
-        .apply(lambda s: ", ".join(s.tolist()[:top_k]))
-        .to_dict()
-    )
+    return kw_df.sort_values(["cluster_id", "rank"]).groupby("cluster_id")["term"].apply(lambda s: ", ".join(s.tolist()[:top_k])).to_dict()
+
 
 def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
     um = umap.UMAP(
@@ -378,7 +327,6 @@ def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
         verbose=True,
     )
     sample_umap = um.fit_transform(sample_embs)
-
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
         min_samples=HDBSCAN_MIN_SAMPLES,
@@ -395,7 +343,7 @@ def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarra
     try:
         from bertopic import BERTopic
     except Exception as e:
-        warnings.warn(f"BERTopic unavailable ({e}); falling back to UMAP+HDBSCAN.")
+        warnings.warn(f"BERTopic unavailable ({e}); falling back to UMAP+HDBSCAN")
         return cluster_with_hdbscan(sample_embs)
 
     um = umap.UMAP(
@@ -427,63 +375,68 @@ def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarra
     return np.array(labels, dtype=int)
 
 
-def main() -> None:
-    outdir = Path(OUTPUT_DIR)
-    outdir.mkdir(parents=True, exist_ok=True)
+def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: int) -> np.ndarray:
+    if "gender_std" not in idx.columns:
+        return np.zeros(len(idx), dtype=bool)
+    gmask = idx["gender_std"].astype(str).str.lower().eq(gender)
 
-    print("[load] embeddings + index")
-    embs = load_all_embeddings(outdir, SHARD_PREFIX)
-    idx = load_aligned_index(outdir)
-    idx = reconcile_index_length(outdir, idx, len(embs))
-    if "body_norm" not in idx.columns:
-        raise ValueError("Index is missing body_norm column; required for keywords and export.")
-    print(f"[load] N={len(embs)} dim={embs.shape[1]}")
+    if "age" in idx.columns:
+        age = pd.to_numeric(idx["age"], errors="coerce")
+        amask = (age >= age_min) & (age <= age_max)
+        return (gmask & amask.fillna(False)).to_numpy()
 
-    print("[seeds] loading guided topic JSON")
-    seed_labels, seed_topic_list = load_guided_topics(outdir / GUIDED_TOPICS_JSON)
-    print(f"[seeds] loaded {len(seed_topic_list)} topics from {GUIDED_TOPICS_JSON}")
+    # fallback with age_group approximation
+    ag = idx.get("age_group", pd.Series(["ukjent"] * len(idx))).astype(str)
+    if age_min == 13 and age_max == 15:
+        amask = ag.eq("13-16")  # includes 16 when exact age is unavailable
+    else:
+        amask = ag.isin(["17-19", "20+"])  # approximates 16-20 when exact age is unavailable
+    return (gmask & amask).to_numpy()
 
-    print("[sample] stratified sample")
-    sample_idx = stratified_sample_index(idx, SAMPLE_SIZE, MIN_PER_STRATUM, SAMPLE_RANDOM_STATE)
+
+def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg: np.ndarray, seed_labels: List[str], seed_topic_list: List[List[str]]) -> None:
+    print(f"\n[segment] {seg_name} | N={len(idx_seg)}")
+    if len(idx_seg) < max(HDBSCAN_MIN_CLUSTER_SIZE * 3, 1000):
+        warnings.warn(f"Segment {seg_name} too small; skipping")
+        return
+
+    sample_target = min(SAMPLE_SIZE, len(idx_seg))
+    sample_idx = stratified_sample_index(idx_seg, sample_target, MIN_PER_STRATUM, SAMPLE_RANDOM_STATE)
     if len(sample_idx) == 0:
-        raise RuntimeError("Sampling returned 0 rows.")
-    sample_embs = embs[sample_idx]
-    sample_texts = idx.iloc[sample_idx]["body_norm"].astype(str).tolist()
-    print(f"[sample] {len(sample_idx)} / {len(idx)}")
+        warnings.warn(f"Segment {seg_name} returned empty sample; skipping")
+        return
 
-    print("[cluster] fitting on sample")
+    sample_embs = embs_seg[sample_idx]
+    sample_texts = idx_seg.iloc[sample_idx]["body_norm"].astype(str).tolist()
+
     if USE_BERTOPIC_GUIDED and seed_topic_list:
         sample_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
-        print("[cluster] mode=bertopic_guided")
+        mode = "bertopic_guided"
     else:
         sample_labels = cluster_with_hdbscan(sample_embs)
-        print("[cluster] mode=umap_hdbscan")
+        mode = "umap_hdbscan"
 
     n_clusters = int(len(set(sample_labels[sample_labels >= 0])))
-    print(f"[cluster] discovered={n_clusters} noise={(sample_labels == -1).sum()}")
+    print(f"[segment:{seg_name}] mode={mode} clusters={n_clusters} noise={(sample_labels == -1).sum()}")
 
     centroids = compute_centroids(sample_embs, sample_labels)
-    print(f"[centroids] {len(centroids)}")
+    labels_all, sim_all, margin_all = assign_all(embs_seg, centroids, ASSIGN_MIN_SIM, ASSIGN_MIN_MARGIN)
+    print(f"[segment:{seg_name}] assigned={(labels_all >= 0).sum()} noise={(labels_all < 0).sum()}")
 
-    print("[assign] assigning all embeddings")
-    labels_all, sim_all, margin_all = assign_all(embs, centroids, ASSIGN_MIN_SIM, ASSIGN_MIN_MARGIN)
-    print(f"[assign] assigned={(labels_all >= 0).sum()} noise={(labels_all < 0).sum()}")
-
-    out_assign = idx.copy()
+    out_assign = idx_seg.copy()
     out_assign["cluster_id"] = labels_all
     out_assign["cluster_sim"] = sim_all
     out_assign["cluster_margin"] = margin_all
     out_assign = normalize_export_dtypes(out_assign)
+
     try:
         out_assign.to_parquet(outdir / "A_cluster_assignments.parquet", index=False)
     except Exception as e:
-        warnings.warn(f"Parquet export failed ({e}); writing CSV fallback.")
+        warnings.warn(f"Parquet export failed for {seg_name} ({e}); writing CSV fallback")
         out_assign.to_csv(outdir / "A_cluster_assignments.csv", index=False, encoding="utf-8")
 
-    unassigned = out_assign[out_assign["cluster_id"] < 0].copy()
-    unassigned = unassigned.sort_values(["cluster_sim", "cluster_margin"], ascending=[False, True])
+    unassigned = out_assign[out_assign["cluster_id"] < 0].copy().sort_values(["cluster_sim", "cluster_margin"], ascending=[False, True])
     unassigned.to_csv(outdir / "A_unassigned_questions.csv", index=False, encoding="utf-8")
-    print(f"[export] A_unassigned_questions.csv rows={len(unassigned)}")
 
     valid = out_assign[out_assign["cluster_id"] >= 0].copy()
     texts_by_cluster = {
@@ -492,16 +445,13 @@ def main() -> None:
     }
 
     if texts_by_cluster:
-        # Keep legacy mixed ngram output for backward compatibility
         kw = ctfi_df(texts_by_cluster, ngram_range=NGRAM_RANGE, min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
-
-        # New: explicit unigram and bigram outputs
         kw_uni = ctfi_df(texts_by_cluster, ngram_range=(1, 1), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
         kw_bi = ctfi_df(texts_by_cluster, ngram_range=(2, 2), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
     else:
         kw = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
-        kw_uni = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
-        kw_bi = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
+        kw_uni = kw.copy()
+        kw_bi = kw.copy()
 
     kw.to_csv(outdir / "clusters_keywords.csv", index=False, encoding="utf-8")
     kw_uni.to_csv(outdir / "clusters_keywords_unigrams.csv", index=False, encoding="utf-8")
@@ -511,12 +461,13 @@ def main() -> None:
     top_terms = top_terms_per_cluster(kw, TOP_K_TERMS)
     top_unigrams = top_terms_per_cluster(kw_uni, TOP_K_TERMS)
     top_bigrams = top_terms_per_cluster(kw_bi, TOP_K_TERMS)
-    catalog_rows = []
+
+    rows = []
     for _, r in sizes.iterrows():
         cid = int(r["cluster_id"])
         grp = valid[valid["cluster_id"] == cid]
         exemplar = grp.iloc[0]["body_norm"] if len(grp) else ""
-        catalog_rows.append({
+        rows.append({
             "cluster_id": cid,
             "size": int(r["size"]),
             "top_terms": top_terms.get(cid, ""),
@@ -524,41 +475,60 @@ def main() -> None:
             "top_bigrams": top_bigrams.get(cid, ""),
             "exemplar_text": str(exemplar)[:400].replace("\n", " "),
         })
-    pd.DataFrame(catalog_rows).sort_values("size", ascending=False).to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
+    pd.DataFrame(rows).sort_values("size", ascending=False).to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
 
     params = {
+        "segment": seg_name,
+        "mode": mode,
+        "n_total": int(len(idx_seg)),
+        "n_sample": int(len(sample_idx)),
+        "n_clusters": n_clusters,
+        "n_assigned": int((labels_all >= 0).sum()),
+        "n_noise": int((labels_all < 0).sum()),
         "files": {
-            "embeddings": str(outdir / A_EMB_FILE),
-            "index": str(outdir / A_INDEX_FILE),
-            "late_rows_file": str(outdir / LATE_ROWS_FILE),
-            "guided_topics_json": str(outdir / GUIDED_TOPICS_JSON),
+            "guided_topics_json": str(Path(OUTPUT_DIR) / GUIDED_TOPICS_JSON),
             "clusters_keywords": str(outdir / "clusters_keywords.csv"),
             "clusters_keywords_unigrams": str(outdir / "clusters_keywords_unigrams.csv"),
             "clusters_keywords_bigrams": str(outdir / "clusters_keywords_bigrams.csv"),
         },
         "sampling": {"size": SAMPLE_SIZE, "min_per_stratum": MIN_PER_STRATUM, "seed": SAMPLE_RANDOM_STATE},
-        "umap": {
-            "n_neighbors": UMAP_N_NEIGHBORS,
-            "min_dist": UMAP_MIN_DIST,
-            "n_components": UMAP_N_COMPONENTS,
-            "metric": UMAP_METRIC,
-            "random_state": UMAP_RANDOM_STATE,
-        },
-        "hdbscan": {
-            "min_cluster_size": HDBSCAN_MIN_CLUSTER_SIZE,
-            "min_samples": HDBSCAN_MIN_SAMPLES,
-            "cluster_selection_epsilon": HDBSCAN_CLUSTER_SELECTION_EPSILON,
-            "cluster_selection_method": HDBSCAN_CLUSTER_SELECTION_METHOD,
-            "core_dist_n_jobs": HDBSCAN_CORE_DIST_N_JOBS,
-        },
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
         "guided_topics_loaded": len(seed_topic_list),
         "guided_topic_labels": seed_labels,
+        "age_split_note": "Exact 13-15/16-20 requires numeric age column. age_group fallback is approximate.",
     }
     with open(outdir / "clustering_run_params.json", "w", encoding="utf-8") as f:
         json.dump(params, f, ensure_ascii=False, indent=2)
 
-    print("[done] completed clustering pipeline")
+
+def main() -> None:
+    outdir = Path(OUTPUT_DIR)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    print("[load] embeddings + index")
+    embs = load_all_embeddings(outdir, SHARD_PREFIX)
+    idx = load_aligned_index(outdir)
+    idx = reconcile_index_length(outdir, idx, len(embs))
+    if "body_norm" not in idx.columns:
+        raise ValueError("Index is missing body_norm column")
+
+    seed_labels, seed_topic_list = load_guided_topics(outdir / GUIDED_TOPICS_JSON)
+    print(f"[seeds] loaded {len(seed_topic_list)} topics from {GUIDED_TOPICS_JSON}")
+
+    if RUN_SEGMENTED:
+        base = outdir / SEGMENT_OUTPUT_SUBDIR
+        base.mkdir(parents=True, exist_ok=True)
+        for seg in SEGMENTS:
+            mask = build_segment_mask(idx, seg["gender"], seg["age_min"], seg["age_max"])
+            idx_seg = idx.loc[mask].reset_index(drop=True)
+            embs_seg = embs[mask]
+            seg_out = base / seg["name"]
+            seg_out.mkdir(parents=True, exist_ok=True)
+            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg, seed_labels, seed_topic_list)
+    else:
+        run_one_segment("all", outdir, idx.reset_index(drop=True), embs, seed_labels, seed_topic_list)
+
+    print("[done] clustering pipeline completed")
 
 
 if __name__ == "__main__":
