@@ -1,76 +1,116 @@
 Project handover notes (BERTopic_ung.no)
 ======================================
 
-What has been completed
------------------------
-1) Late-arriving data embeddings
+Current project status (latest)
+-------------------------------
+1) Late-arriving data has been embedded and appended as shards
    - Script: embed_late_arrivals.py
-   - Outcome: late rows were embedded and appended as shard files in outputs/.
-   - Trace files in outputs/: late_arrivals_body_norm.csv, late_arrivals_embedding_report.json
+   - Output traces in outputs/:
+     - late_arrivals_body_norm.csv
+     - late_arrivals_embedding_report.json
 
-2) Bottom-up clustering run
+2) Segmented clustering is now the default mode
    - Script: bottom_up_clustering.py
-   - Recent run completed clustering and assignment.
-   - Outputs include:
-     - A_cluster_assignments.parquet (or CSV fallback)
-     - A_unassigned_questions.csv
-     - clusters_keywords.csv (mixed ngram)
-     - clusters_keywords_unigrams.csv (new)
-     - clusters_keywords_bigrams.csv (new)
-     - clusters_catalog.csv (now includes top_unigrams + top_bigrams columns)
-     - clustering_run_params.json
+   - RUN_SEGMENTED = True
+   - Segments:
+     - boys_13_15
+     - boys_16_20
+     - girls_13_15
+     - girls_16_20
+   - Output location per segment:
+     outputs/segments/<segment_name>/
 
-3) Review package generator
-   - Script: prepare_cluster_review.py
-   - Creates folder-based review structure for manual labeling:
-     - cluster_review/cluster_XXXX/questions.csv
-     - cluster_review/cluster_XXXX/sample_for_labeling.csv
-     - cluster_review/unclustered/questions.csv
-     - cluster_review/unclustered/sample_for_review.csv
-     - cluster_review/labels_template.csv
+3) BERTopic-guided mode has been used successfully
+   - BERTopic is installed in the active environment.
+   - Guided seed topics are loaded from:
+     outputs/guided_topics.json
+   - If BERTopic import fails in a future session, script falls back to UMAP+HDBSCAN.
 
-Recommended next steps when returning
--------------------------------------
-A) Inspect cluster quality
-   1. Open clusters_catalog.csv
-      - Focus on: cluster size, top_unigrams, top_bigrams, exemplar_text.
-   2. Open clusters_keywords_unigrams.csv and clusters_keywords_bigrams.csv
-      - Confirm top terms are coherent within each cluster.
+4) Outputs produced per segment
+   - A_cluster_assignments.parquet (or CSV fallback)
+   - A_unassigned_questions.csv
+   - clusters_keywords.csv
+   - clusters_keywords_unigrams.csv
+   - clusters_keywords_bigrams.csv
+   - clusters_catalog.csv
+   - clustering_run_params.json
 
-B) Run review packaging
+What to do first next time
+--------------------------
+A) Verify environment and branch
+   1. Pull latest main in local repo.
+   2. Confirm BERTopic is importable in the active interpreter.
+
+B) Validate guided topics file
+   1. Open outputs/guided_topics.json.
+   2. Remove broad/ambiguous seed terms.
+   3. Keep only high-precision terms that are diagnostic for each category.
+
+C) Run segmented clustering
    Command:
-   python prepare_cluster_review.py --output-dir "<YOUR_OUTPUT_DIR>"
+   python bottom_up_clustering.py
+
+D) Inspect per-segment outputs
+   For each segment under outputs/segments/<segment_name>/:
+   1. Open clusters_catalog.csv
+      - focus on size, top_unigrams, top_bigrams, exemplar_text.
+   2. Open clusters_keywords_unigrams.csv and clusters_keywords_bigrams.csv
+      - check if terms are coherent and specific.
+   3. Open A_unassigned_questions.csv
+      - identify recurring themes not covered by seeds.
+
+E) Build review package after clustering (per segment)
+   Run once per segment output directory, e.g.:
+   python prepare_cluster_review.py \
+     --output-dir "<OUTPUT_DIR>\segments\girls_16_20"
 
    Then inspect:
    - cluster_review/cluster_XXXX/sample_for_labeling.csv
    - cluster_review/unclustered/sample_for_review.csv
+   - labels_template.csv
 
-C) Labeling workflow
-   1. Fill cluster_review/labels_template.csv:
-      - label_name
-      - label_description
-      - merge_into_cluster_id (optional)
-      - drop_cluster (optional)
-   2. Note recurring themes in unclustered rows.
-   3. Add those as seed topics in guided_topics.json for the next run.
+F) Human-in-the-loop refinement loop
+   1. Label/merge/drop using labels_template.csv.
+   2. Add missing seed topics from unclustered patterns.
+   3. Re-run clustering.
+   4. Compare with previous run before changing more parameters.
 
-D) If too many unassigned rows
-   - Relax thresholds slightly and rerun clustering:
-     - ASSIGN_MIN_SIM: try 0.42 (from 0.44)
-     - ASSIGN_MIN_MARGIN: try 0.01 (from 0.015)
-   - Keep only one change per run to compare impact clearly.
+Parameter tuning playbook
+-------------------------
+Goal: cleaner clusters (higher purity)
+- Keep ASSIGN_MIN_SIM at 0.44 or increase to 0.46
+- Keep ASSIGN_MIN_MARGIN at 0.025 or increase to 0.03
+- Expect more unassigned rows as purity rises
 
-E) Keep run logs
-   - Save clustering_run_params.json per run (copy/rename with date)
-   - Keep a short run diary: sample size, thresholds, % unassigned, notes.
+Goal: more coverage (fewer unassigned)
+- Lower ASSIGN_MIN_MARGIN to 0.02 (or 0.015)
+- Optionally lower ASSIGN_MIN_SIM to 0.42
+- Expect some clusters to become less pure
+
+Important: change one thing at a time.
+
+Run logging checklist
+---------------------
+For every run, record:
+- date/time
+- segment name
+- seed file version used
+- SAMPLE_SIZE
+- ASSIGN_MIN_SIM
+- ASSIGN_MIN_MARGIN
+- discovered clusters
+- assigned vs unassigned counts
+- notes about mixed clusters
+
+Save each segment's clustering_run_params.json with a timestamped copy for reproducibility.
 
 Quick commands
 --------------
-1) Clustering
+1) Segmented clustering
    python bottom_up_clustering.py
 
-2) Review package
-   python prepare_cluster_review.py --output-dir "<YOUR_OUTPUT_DIR>"
+2) Build review package for a specific segment
+   python prepare_cluster_review.py --output-dir "<OUTPUT_DIR>\segments\boys_13_15"
 
-3) Late arrivals embedding (if new data arrives)
-   python embed_late_arrivals.py --late-csv "<LATE_CSV_PATH>" --output-dir "<YOUR_OUTPUT_DIR>"
+3) Late-arrivals embedding (when new data appears)
+   python embed_late_arrivals.py --late-csv "<LATE_CSV_PATH>" --output-dir "<OUTPUT_DIR>"
