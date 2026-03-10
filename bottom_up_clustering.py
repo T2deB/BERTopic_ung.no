@@ -266,18 +266,37 @@ def compute_centroids(embs: np.ndarray, labels: np.ndarray) -> Dict[int, np.ndar
 def assign_all(embs: np.ndarray, centroids: Dict[int, np.ndarray], min_sim: float, min_margin: float):
     if not centroids:
         n = len(embs)
-        return np.full(n, -1, dtype=int), np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
+        return (
+            np.full(n, -1, dtype=int),
+            np.zeros(n, dtype=np.float32),
+            np.zeros(n, dtype=np.float32),
+            np.full(n, -1, dtype=int),
+            np.zeros(n, dtype=np.float32),
+        )
     labs = sorted(centroids.keys())
     C = np.vstack([centroids[k] for k in labs])
     E = l2norm(embs.copy())
     sims = E @ C.T
-    best_k = sims.argmax(axis=1)
-    best_sim = sims.max(axis=1)
-    second_sim = np.partition(sims, -2, axis=1)[:, -2] if sims.shape[1] > 1 else np.zeros_like(best_sim)
+
+    order = np.argsort(-sims, axis=1)
+    best_k = order[:, 0]
+    second_k = order[:, 1] if sims.shape[1] > 1 else np.full(len(embs), -1, dtype=int)
+
+    best_sim = sims[np.arange(len(embs)), best_k]
+    second_sim = sims[np.arange(len(embs)), second_k] if sims.shape[1] > 1 else np.zeros_like(best_sim)
     margin = best_sim - second_sim
+
     out_labels = np.array([labs[k] for k in best_k], dtype=int)
+    out_second_labels = np.array([labs[k] for k in second_k], dtype=int) if sims.shape[1] > 1 else np.full(len(embs), -1, dtype=int)
     out_labels[(best_sim < float(min_sim)) | (margin < float(min_margin))] = -1
-    return out_labels, best_sim.astype(np.float32), margin.astype(np.float32)
+
+    return (
+        out_labels,
+        best_sim.astype(np.float32),
+        margin.astype(np.float32),
+        out_second_labels,
+        second_sim.astype(np.float32),
+    )
 
 
 def ctfi_df(texts_per_cluster: Dict[int, List[str]], ngram_range=(1, 2), min_df=3, stop_words=None, top_k=15) -> pd.DataFrame:
@@ -420,13 +439,17 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
     print(f"[segment:{seg_name}] mode={mode} clusters={n_clusters} noise={(sample_labels == -1).sum()}")
 
     centroids = compute_centroids(sample_embs, sample_labels)
-    labels_all, sim_all, margin_all = assign_all(embs_seg, centroids, ASSIGN_MIN_SIM, ASSIGN_MIN_MARGIN)
+    labels_all, sim_all, margin_all, second_labels_all, second_sim_all = assign_all(
+        embs_seg, centroids, ASSIGN_MIN_SIM, ASSIGN_MIN_MARGIN
+    )
     print(f"[segment:{seg_name}] assigned={(labels_all >= 0).sum()} noise={(labels_all < 0).sum()}")
 
     out_assign = idx_seg.copy()
     out_assign["cluster_id"] = labels_all
     out_assign["cluster_sim"] = sim_all
     out_assign["cluster_margin"] = margin_all
+    out_assign["cluster_id_2"] = second_labels_all
+    out_assign["cluster_sim_2"] = second_sim_all
     out_assign = normalize_export_dtypes(out_assign)
 
     try:
