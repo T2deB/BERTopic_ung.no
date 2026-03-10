@@ -89,6 +89,52 @@ Goal: more coverage (fewer unassigned)
 
 Important: change one thing at a time.
 
+How to interpret cluster_sim and cluster_margin
+-----------------------------------------------
+Definitions (from assign_all in bottom_up_clustering.py):
+- cluster_sim = cosine similarity to the winning centroid (best_sim)
+- cluster_margin = best_sim - second_best_sim
+
+Intuition:
+- High cluster_sim + high cluster_margin
+  -> confident assignment (close to one cluster and clearly farther from alternatives)
+- High cluster_sim + low cluster_margin
+  -> near a boundary between two plausible clusters (theme overlap)
+- Low cluster_sim + high cluster_margin
+  -> not very close to any centroid, but still "least bad" toward one cluster
+- Low cluster_sim + low cluster_margin
+  -> weak/ambiguous point; good candidate for unassigned bucket
+
+Operationally in this project:
+- A row is forced to unassigned (cluster_id = -1) when either
+  cluster_sim < ASSIGN_MIN_SIM OR cluster_margin < ASSIGN_MIN_MARGIN.
+- This means margin acts as a "separability" gate and sim acts as an
+  "absolute fit" gate.
+
+Practical guidance for large mixed clusters (example: cluster 150)
+------------------------------------------------------------------
+When a large cluster contains many different question types, increase assignment
+strictness first (before changing UMAP/HDBSCAN), then review what moves to
+unassigned.
+
+Recommended sequence:
+1) Raise margin only:
+   - ASSIGN_MIN_MARGIN: 0.025 -> 0.03 (or 0.035)
+   - Keep ASSIGN_MIN_SIM unchanged.
+2) Re-run and inspect:
+   - cluster size drop for the mixed cluster
+   - thematic coherence in sample_for_labeling.csv
+   - increase in A_unassigned_questions.csv
+3) If still mixed, raise similarity modestly:
+   - ASSIGN_MIN_SIM: 0.44 -> 0.46
+4) Stop when extra strictness mostly removes useful in-cluster examples.
+
+Rule of thumb with your overview table:
+- sim_mean around 0.82-0.86 is common, so assignment quality is often decided by
+  margin for borderline items.
+- clusters with high margin_mean are usually easier to label cleanly.
+- if margin_mean is low and top examples are semantically broad, tighten margin first.
+
 Run logging checklist
 ---------------------
 For every run, record:
