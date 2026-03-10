@@ -28,6 +28,7 @@ Current project status (latest)
 
 4) Outputs produced per segment
    - A_cluster_assignments.parquet (or CSV fallback)
+     - includes primary and secondary candidates: cluster_id / cluster_sim and cluster_id_2 / cluster_sim_2
    - A_unassigned_questions.csv
    - clusters_keywords.csv
    - clusters_keywords_unigrams.csv
