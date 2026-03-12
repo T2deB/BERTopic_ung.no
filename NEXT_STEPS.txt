@@ -1,91 +1,109 @@
 Project handover notes (BERTopic_ung.no)
 ======================================
 
-Current project status (latest)
--------------------------------
-1) Late-arriving data has been embedded and appended as shards
-   - Script: embed_late_arrivals.py
-   - Output traces in outputs/:
-     - late_arrivals_body_norm.csv
-     - late_arrivals_embedding_report.json
+Current project status (2026-03-12)
+------------------------------------
+1) Fuzzy BERTopic mode has been fully implemented and run
+   - bottom_up_clustering.py now uses Fuzzy c-means instead of HDBSCAN
+   - USE_FUZZY_BERTOPIC = True (default)
+   - FUZZY_N_CLUSTERS = 50, FUZZY_M = 2.0
+   - Each document gets a soft membership vector across all clusters
+   - Per-document top-3 cluster assignments stored as paired columns:
+     fuzzy_top1_cluster, fuzzy_top1_score
+     fuzzy_top2_cluster, fuzzy_top2_score
+     fuzzy_top3_cluster, fuzzy_top3_score
+   - TIadj term importance computed and stored in clusters_keywords.csv
+   - Exact age joined from C_index.parquet (left-join on body_norm + createdAt)
+   - Progress bars (tqdm) added to terminal output during clustering
 
-2) Segmented clustering is now the default mode
-   - Script: bottom_up_clustering.py
-   - RUN_SEGMENTED = True
-   - Segments:
-     - boys_13_15
-     - boys_16_20
-     - girls_13_15
-     - girls_16_20
+2) Review packages have been generated for all segments
+   - Command used: python prepare_cluster_review.py --all-segments
    - Output location per segment:
-     outputs/segments/<segment_name>/
+     outputs/segments/<segment_name>/cluster_review/
 
-3) BERTopic-guided mode has been used successfully
-   - BERTopic is installed in the active environment.
-   - Guided seed topics are loaded from:
-     outputs/guided_topics.json
-   - If BERTopic import fails in a future session, script falls back to UMAP+HDBSCAN.
+3) Review package now includes fuzzy-specific outputs
+   Per segment, under cluster_review/:
+   - sample_fuzzy.csv          — per-cluster samples with primary/secondary/tertiary
+                                  membership scores and matched_topic_terms
+   - fuzzy/boundary_documents.csv     — docs where primary membership < 0.5
+   - fuzzy/cluster_overlap_matrix.csv — co-occurrence between primary clusters
+   - fuzzy/multi_topic_examples.csv   — docs where top-2 memberships both > 0.3
+   - fuzzy/topic_word_comparison.csv  — cross-cluster TIadj terms vs freq-based proxy
+   - cluster_XXXX/topic_words_fuzzy.csv — per-cluster TIadj ranked terms with
+                                           TIadj_rank, TIadj_score, present_in_N_docs,
+                                           freq_rank, rank_diff
 
-4) Outputs produced per segment
-   - A_cluster_assignments.parquet (or CSV fallback)
-   - A_unassigned_questions.csv
-   - clusters_keywords.csv
-   - clusters_keywords_unigrams.csv
-   - clusters_keywords_bigrams.csv
-   - clusters_catalog.csv
-   - clustering_run_params.json
+4) Segmented clustering (background context)
+   - Script: bottom_up_clustering.py
+   - Segments: boys_13_15, boys_16_20, girls_13_15, girls_16_20
+   - Output location per segment: outputs/segments/<segment_name>/
+
+5) BERTopic-guided mode
+   - Guided seed topics loaded from: outputs/guided_topics.json
+   - Falls back to UMAP+HDBSCAN if BERTopic import fails
 
 What to do first next time
 --------------------------
-A) Verify environment and branch
-   1. Pull latest main in local repo.
-   2. Confirm BERTopic is importable in the active interpreter.
+A) Inspect clusters across all segments
+   For each segment under outputs/segments/<segment_name>/cluster_review/:
 
-B) Validate guided topics file
-   1. Open outputs/guided_topics.json.
-   2. Remove broad/ambiguous seed terms.
-   3. Keep only high-precision terms that are diagnostic for each category.
+   1. Open cluster_review/cluster_overview.csv
+      - Check mean_primary_membership (ideally > 0.6), boundary_doc_count
+      - Flag clusters with low mean membership or high boundary count
 
-C) Run segmented clustering
-   Command:
-   python bottom_up_clustering.py
+   2. For each cluster folder cluster_XXXX/:
+      - Open topic_words_fuzzy.csv
+        -> Top terms by TIadj_rank are the "fuzzy" topic signature
+        -> rank_diff shows where fuzzy weighting diverges from raw frequency
+      - Open sample_for_labeling.csv (standard sample)
+      - Open sample_fuzzy.csv (fuzzy-enriched sample with matched_topic_terms)
+        -> matched_topic_terms shows the top TIadj terms for that cluster
 
-D) Inspect per-segment outputs
-   For each segment under outputs/segments/<segment_name>/:
-   1. Open clusters_catalog.csv
-      - focus on size, top_unigrams, top_bigrams, exemplar_text.
-   2. Open clusters_keywords_unigrams.csv and clusters_keywords_bigrams.csv
-      - check if terms are coherent and specific.
-   3. Open A_unassigned_questions.csv
-      - identify recurring themes not covered by seeds.
+   3. Open fuzzy/topic_word_comparison.csv
+      - Sorted by overlap_count ascending: clusters at the top have the most
+        distinct topic terms (best separated)
+      - Clusters at the bottom with low overlap may need merging
 
-E) Build review package after clustering (per segment)
-   Run once per segment output directory, e.g.:
-   python prepare_cluster_review.py \
-     --output-dir "<OUTPUT_DIR>\segments\girls_16_20"
+   4. Open fuzzy/cluster_overlap_matrix.csv
+      - High co-occurrence between two clusters → consider merging them
 
-   Then inspect:
-   - cluster_review/cluster_XXXX/sample_for_labeling.csv
-   - cluster_review/unclustered/sample_for_review.csv
-   - labels_template.csv
+   5. Open fuzzy/boundary_documents.csv
+      - These docs are genuinely multi-topic (primary membership < 0.5)
+      - Check if a recurring theme suggests a missing cluster
 
-F) Human-in-the-loop refinement loop
-   1. Label/merge/drop using labels_template.csv.
-   2. Add missing seed topics from unclustered patterns.
-   3. Re-run clustering.
-   4. Compare with previous run before changing more parameters.
+   6. Open fuzzy/multi_topic_examples.csv
+      - Both top-2 memberships > 0.3: informative for seeing theme overlap
+
+   Questions to answer per segment:
+   - Are the clusters thematically coherent?
+   - Are there clusters that should be merged or split?
+   - Are there recurring themes in boundary documents not covered by existing clusters?
+
+B) Update GitHub repo
+   After inspection and any code changes:
+   git add -A
+   git commit -m "..."
+   git push
+
+Human-in-the-loop refinement loop (when ready)
+-----------------------------------------------
+1. Label/merge/drop clusters using labels_template.csv.
+2. Add missing seed topics from unclustered patterns or boundary documents.
+3. Adjust guided_topics.json and re-run clustering.
+4. Re-generate review package: python prepare_cluster_review.py --all-segments
+5. Compare cluster_overview.csv before/after before changing more parameters.
 
 Parameter tuning playbook
 -------------------------
-Goal: cleaner clusters (higher purity)
-- Keep ASSIGN_MIN_SIM at 0.44 or increase to 0.46
-- Keep ASSIGN_MIN_MARGIN at 0.025 or increase to 0.03
-- Expect more unassigned rows as purity rises
+Goal: cleaner clusters (higher purity / higher mean_primary_membership)
+- Increase FUZZY_N_CLUSTERS (e.g. 50 -> 60)
+- Increase FUZZY_M toward 1 (harder assignments; 1.0 = hard clustering)
+- Raise ASSIGN_MIN_MARGIN to push ambiguous docs to unassigned
 
-Goal: more coverage (fewer unassigned)
-- Lower ASSIGN_MIN_MARGIN to 0.02 (or 0.015)
+Goal: more coverage (fewer unassigned / lower boundary rate)
+- Lower ASSIGN_MIN_MARGIN to 0.02 or 0.015
+- Lower FUZZY_M toward 2+ (softer memberships; 2.0 is default)
 - Optionally lower ASSIGN_MIN_SIM to 0.42
-- Expect some clusters to become less pure
 
 Important: change one thing at a time.
 
@@ -108,32 +126,43 @@ Intuition:
 Operationally in this project:
 - A row is forced to unassigned (cluster_id = -1) when either
   cluster_sim < ASSIGN_MIN_SIM OR cluster_margin < ASSIGN_MIN_MARGIN.
-- This means margin acts as a "separability" gate and sim acts as an
-  "absolute fit" gate.
 
-Practical guidance for large mixed clusters (example: cluster 150)
-------------------------------------------------------------------
-When a large cluster contains many different question types, increase assignment
-strictness first (before changing UMAP/HDBSCAN), then review what moves to
-unassigned.
+How to interpret fuzzy outputs
+-------------------------------
+- mean_primary_membership in cluster_overview.csv
+  -> Average confidence that documents assigned to this cluster truly belong here.
+  -> Values below 0.5 suggest the cluster is thematically diffuse.
 
-Recommended sequence:
-1) Raise margin only:
-   - ASSIGN_MIN_MARGIN: 0.025 -> 0.03 (or 0.035)
-   - Keep ASSIGN_MIN_SIM unchanged.
-2) Re-run and inspect:
-   - cluster size drop for the mixed cluster
-   - thematic coherence in sample_for_labeling.csv
-   - increase in A_unassigned_questions.csv
-3) If still mixed, raise similarity modestly:
-   - ASSIGN_MIN_SIM: 0.44 -> 0.46
-4) Stop when extra strictness mostly removes useful in-cluster examples.
+- boundary_doc_count / boundary_pct
+  -> Documents where the top membership score < 0.5.
+  -> High boundary rate in a cluster = overlapping themes; consider splitting.
 
-Rule of thumb with your overview table:
-- sim_mean around 0.82-0.86 is common, so assignment quality is often decided by
-  margin for borderline items.
-- clusters with high margin_mean are usually easier to label cleanly.
-- if margin_mean is low and top examples are semantically broad, tighten margin first.
+- rank_diff in topic_words_fuzzy.csv
+  -> TIadj_rank minus freq_rank
+  -> Positive: term ranks higher in fuzzy scoring than raw frequency
+     (term is characteristic for high-membership docs)
+  -> Negative: term is frequent but less characteristic of the cluster core
+
+- overlap_count in topic_word_comparison.csv
+  -> Number of shared terms between fuzzy top-5 and frequency top-5 for a cluster
+  -> Low overlap = fuzzy weighting surfaces different terms than raw frequency
+
+Quick commands
+--------------
+1) Segmented clustering
+   python bottom_up_clustering.py
+
+2) Build review packages for all segments
+   python prepare_cluster_review.py --all-segments
+
+3) Build review package for a single segment
+   python prepare_cluster_review.py --segment girls_16_20
+
+4) Build review package without fuzzy outputs
+   python prepare_cluster_review.py --all-segments --skip-fuzzy
+
+5) Late-arrivals embedding (when new data appears)
+   python embed_late_arrivals.py --late-csv "<LATE_CSV_PATH>" --output-dir "<OUTPUT_DIR>"
 
 Run logging checklist
 ---------------------
@@ -142,21 +171,12 @@ For every run, record:
 - segment name
 - seed file version used
 - SAMPLE_SIZE
-- ASSIGN_MIN_SIM
-- ASSIGN_MIN_MARGIN
+- FUZZY_N_CLUSTERS, FUZZY_M
+- ASSIGN_MIN_SIM, ASSIGN_MIN_MARGIN
 - discovered clusters
 - assigned vs unassigned counts
-- notes about mixed clusters
+- mean_primary_membership across clusters
+- boundary_pct
+- notes about mixed or overlapping clusters
 
 Save each segment's clustering_run_params.json with a timestamped copy for reproducibility.
-
-Quick commands
---------------
-1) Segmented clustering
-   python bottom_up_clustering.py
-
-2) Build review package for a specific segment
-   python prepare_cluster_review.py --output-dir "<OUTPUT_DIR>\segments\boys_13_15"
-
-3) Late-arrivals embedding (when new data appears)
-   python embed_late_arrivals.py --late-csv "<LATE_CSV_PATH>" --output-dir "<OUTPUT_DIR>"

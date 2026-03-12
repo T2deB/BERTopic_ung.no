@@ -28,6 +28,15 @@ from scipy.sparse import spdiags
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.preprocessing import normalize
 
+try:
+    from tqdm import tqdm as _tqdm
+except ImportError:
+    def _tqdm(it, **kwargs):  # type: ignore[misc]
+        desc = kwargs.get("desc", "")
+        if desc:
+            print(f"[progress] {desc} ...")
+        return it
+
 # ---------------------------
 # CONFIG
 # ---------------------------
@@ -35,10 +44,17 @@ OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring -
 SHARD_PREFIX = "bodynorm"
 A_EMB_FILE = "A_embeddings.npz"
 A_INDEX_FILE = "C_candidates_index.parquet"
+AGE_LOOKUP_FILE = "C_index.parquet"   # optional; provides exact numeric age column
 LATE_ROWS_FILE = "late_arrivals_body_norm.csv"
 
 GUIDED_TOPICS_JSON = "guided_topics.json"
 USE_BERTOPIC_GUIDED = True
+
+# Fuzzy BERTopic (Nikbakht & Zojaji, 2026)
+USE_FUZZY_BERTOPIC = True   # set True to activate fuzzy c-means mode
+FUZZY_N_CLUSTERS = 50        # cluster count when not using guided seed
+FUZZY_M = 2.0                # fuzziness exponent (m=2 is standard)
+FUZZY_BATCH_SIZE = 5000      # doc-batch size for TI accumulation and membership prediction
 
 RUN_SEGMENTED = True
 SEGMENT_OUTPUT_SUBDIR = "segments"
@@ -135,6 +151,33 @@ def load_aligned_index(outdir: Path) -> pd.DataFrame:
     if not idx_path.exists():
         raise FileNotFoundError(f"Missing {idx_path}")
     return pd.read_parquet(idx_path)
+
+
+def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> pd.DataFrame:
+    """Join the exact numeric age column from AGE_LOOKUP_FILE into idx.
+
+    Matches rows on (body_norm, createdAt).  Rows without a match keep NaN,
+    and build_segment_mask() already falls back to age_group for those.
+    No-ops if the age column is already present or the lookup file is missing.
+    """
+    if "age" in idx.columns:
+        return idx
+
+    lookup_path = outdir / AGE_LOOKUP_FILE
+    if not lookup_path.exists():
+        warnings.warn(f"[age] {AGE_LOOKUP_FILE} not found; using age_group approximation")
+        return idx
+
+    try:
+        lookup = pd.read_parquet(lookup_path, columns=["body_norm", "createdAt", "age"])
+        lookup = lookup.drop_duplicates(subset=["body_norm", "createdAt"])
+        enriched = idx.merge(lookup, on=["body_norm", "createdAt"], how="left")
+        n_matched = enriched["age"].notna().sum()
+        print(f"[age] exact age joined for {n_matched}/{len(enriched)} rows ({100*n_matched/len(enriched):.1f}%)")
+        return enriched
+    except Exception as exc:
+        warnings.warn(f"[age] could not join exact age from {AGE_LOOKUP_FILE}: {exc}")
+        return idx
 
 
 def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
@@ -375,6 +418,240 @@ def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarra
     return np.array(labels, dtype=int)
 
 
+def cluster_with_fuzzy_cmeans(
+    sample_embs: np.ndarray,
+    n_clusters: int,
+    m: float = 2.0,
+) -> Tuple[np.ndarray, np.ndarray, object, object]:
+    """Fit Fuzzy c-means on UMAP-reduced sample embeddings.
+
+    Returns
+    -------
+    hard_labels : (n_sample,) int ndarray   – argmax of membership per doc
+    membership  : (n_sample, n_clusters) float32 ndarray
+    umap_model  : fitted UMAP instance (needed to transform unseen docs), or None on fallback
+    cntr        : (n_clusters, n_umap_components) cluster centres in UMAP space, or None on fallback
+    """
+    try:
+        from skfuzzy import cluster as fuzz_cluster  # type: ignore  # noqa: F401
+    except ImportError:
+        warnings.warn(
+            "scikit-fuzzy is not installed (pip install scikit-fuzzy). "
+            "Falling back to UMAP + HDBSCAN."
+        )
+        hdb_labels = cluster_with_hdbscan(sample_embs)
+        n_c = max(1, int(len(set(hdb_labels[hdb_labels >= 0]))))
+        membership = np.zeros((len(hdb_labels), n_c), dtype=np.float32)
+        for i, lab in enumerate(hdb_labels):
+            if 0 <= lab < n_c:
+                membership[i, lab] = 1.0
+        return hdb_labels, membership, None, None
+
+    from skfuzzy import cluster as fuzz_cluster  # type: ignore
+
+    um = umap.UMAP(
+        n_neighbors=UMAP_N_NEIGHBORS,
+        min_dist=UMAP_MIN_DIST,
+        n_components=UMAP_N_COMPONENTS,
+        metric=UMAP_METRIC,
+        random_state=UMAP_RANDOM_STATE,
+        verbose=True,
+    )
+    print(f"[fuzzy_cmeans] UMAP fitting {len(sample_embs)} samples...")
+    sample_umap = um.fit_transform(sample_embs)  # (n_sample, n_components)
+
+    # skfuzzy expects shape (n_features, n_samples)
+    data = sample_umap.T.astype(np.float64)
+    print(f"[fuzzy_cmeans] fitting c={n_clusters} clusters, m={m}...")
+    cntr, u, _u0, _d, _jm, _p, fpc = fuzz_cluster.cmeans(
+        data, c=n_clusters, m=m, error=0.005, maxiter=1000, init=None
+    )
+    # u: (n_clusters, n_samples) → transpose to (n_samples, n_clusters)
+    membership = u.T.astype(np.float32)
+    hard_labels = np.argmax(membership, axis=1).astype(int)
+    print(f"[fuzzy_cmeans] done – FPC={fpc:.4f}, unique hard labels={len(np.unique(hard_labels))}")
+    return hard_labels, membership, um, cntr
+
+
+def _predict_fuzzy_membership_batched(
+    embs_all: np.ndarray,
+    umap_model,
+    cntr: np.ndarray,
+    m: float = 2.0,
+) -> np.ndarray:
+    """Predict soft membership for the full segment in FUZZY_BATCH_SIZE chunks.
+
+    Uses the fitted UMAP model to project embeddings into UMAP space, then
+    runs cmeans_predict against the stored cluster centres.
+
+    Returns
+    -------
+    membership : (n_docs, n_clusters) float32 ndarray
+    """
+    try:
+        from skfuzzy import cluster as fuzz_cluster  # type: ignore
+    except ImportError:
+        return None  # caller handles None
+
+    n_docs = len(embs_all)
+    n_clusters = cntr.shape[0]
+    membership_all = np.empty((n_docs, n_clusters), dtype=np.float32)
+
+    batches = range(0, n_docs, FUZZY_BATCH_SIZE)
+    for start in _tqdm(batches, desc="fuzzy predict (UMAP+cmeans)", unit="batch"):
+        end = min(start + FUZZY_BATCH_SIZE, n_docs)
+        umap_coords = umap_model.transform(embs_all[start:end])   # (batch, n_components)
+        test_data = umap_coords.T.astype(np.float64)               # (n_components, batch)
+        u, _u0, _d, _jm, _p, _fpc = fuzz_cluster.cmeans_predict(
+            test_data, cntr, m, error=0.005, maxiter=1000
+        )
+        membership_all[start:end] = u.T.astype(np.float32)
+
+    return membership_all
+
+
+# Internal token batch size for fuzzy_term_importance memory management.
+# (n_vocab × FUZZY_BATCH_SIZE) similarity matrices are computed per inner iteration;
+# keeping token batches small bounds peak RAM.
+_FUZZY_TOKEN_BATCH = 2000
+
+
+def fuzzy_term_importance(
+    texts: List[str],
+    embs: np.ndarray,
+    membership_matrix: np.ndarray,
+    embedding_model=None,
+) -> pd.DataFrame:
+    """Compute fuzzy term importance scores (Algorithm 1, Nikbakht & Zojaji 2026).
+
+    For each vocabulary token t and cluster c:
+        TI(t, c)    = sum_{d: t in d} [ cosine_sim(emb_t, emb_d) × membership(d, c) ]
+        rank_t,c    = rank of c among all clusters by TI(t, ·) descending (1 = best)
+        TIadj(t, c) = TI(t, c) × (1 / rank_t,c)
+
+    Tokens absent from a document contribute 0 (they are excluded from the sum),
+    matching the paper's sentinel value of Sim=2 (outside valid cosine range).
+
+    Documents are processed in batches of FUZZY_BATCH_SIZE; tokens are processed
+    in internal batches of _FUZZY_TOKEN_BATCH to bound peak memory usage.
+
+    Parameters
+    ----------
+    texts            : raw document texts (same order as rows of embs / membership_matrix)
+    embs             : pre-computed document embeddings (n_docs, dim), L2-normalised
+    membership_matrix: (n_docs, n_clusters) float – output of cluster_with_fuzzy_cmeans
+    embedding_model  : optional pre-loaded SentenceTransformer; loaded if None
+
+    Returns
+    -------
+    DataFrame with columns [cluster_id, term, score, rank]  – same format as ctfi_df()
+    """
+    n_docs, n_clusters = membership_matrix.shape
+
+    if n_docs > 10_000:
+        warnings.warn(
+            f"[fuzzy_term_importance] corpus has {n_docs} docs (>10 000); "
+            "computation may be slow – consider sampling first."
+        )
+
+    # Load embedding model if not provided
+    if embedding_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
+            embedding_model = SentenceTransformer("Alibaba-NLP/gte-multilingual-base")
+            print("[fuzzy_ti] loaded SentenceTransformer(gte-multilingual-base)")
+        except Exception as exc:
+            warnings.warn(
+                f"[fuzzy_term_importance] cannot load embedding model: {exc}. "
+                "Returning empty DataFrame."
+            )
+            return pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
+
+    # Build vocabulary with the same tokeniser settings as ctfi_df
+    vect = CountVectorizer(
+        ngram_range=(1, 1),
+        min_df=MIN_DF,
+        max_df=0.6,
+        stop_words=STOP_WORDS,
+        lowercase=True,
+        token_pattern=r"(?u)\b[a-zæøå0-9]{3,}\b",
+        strip_accents=None,
+    )
+    X = vect.fit_transform(texts)        # (n_docs, n_vocab) sparse CSR
+    vocab = vect.get_feature_names_out()
+    n_vocab = len(vocab)
+    print(f"[fuzzy_ti] vocab={n_vocab}, docs={n_docs}, clusters={n_clusters}")
+
+    if n_vocab == 0:
+        return pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
+
+    # Embed all vocabulary tokens
+    token_embs = np.array(
+        embedding_model.encode(
+            vocab.tolist(), batch_size=256, show_progress_bar=True, normalize_embeddings=True
+        ),
+        dtype=np.float32,
+    )  # (n_vocab, dim)
+
+    # Ensure doc embeddings are L2-normalised
+    embs_norm = l2norm(embs.astype(np.float32).copy())  # (n_docs, dim)
+
+    # CSC layout for efficient column (token) slicing inside the token batch loop
+    X_csc = X.tocsc()
+    membership_f64 = membership_matrix.astype(np.float64)
+
+    # Accumulate TI(t, c) = sum_{d: t in d} [ sim(t, d) × membership(d, c) ]
+    ti_matrix = np.zeros((n_vocab, n_clusters), dtype=np.float64)
+
+    n_token_batches = -(-n_vocab // _FUZZY_TOKEN_BATCH)  # ceiling division
+    for t_start in _tqdm(
+        range(0, n_vocab, _FUZZY_TOKEN_BATCH),
+        desc="fuzzy TI (token batches)",
+        unit="batch",
+        total=n_token_batches,
+    ):
+        t_end = min(t_start + _FUZZY_TOKEN_BATCH, n_vocab)
+        tok_embs_batch = token_embs[t_start:t_end]          # (t_batch, dim)
+        tok_X_cols = X_csc[:, t_start:t_end]                # (n_docs, t_batch) CSC
+
+        for d_start in range(0, n_docs, FUZZY_BATCH_SIZE):
+            d_end = min(d_start + FUZZY_BATCH_SIZE, n_docs)
+            d_embs = embs_norm[d_start:d_end]               # (d_batch, dim)
+            d_mem = membership_f64[d_start:d_end]           # (d_batch, n_clusters)
+
+            # Cosine similarities: (t_batch, d_batch)
+            sims = (tok_embs_batch @ d_embs.T).astype(np.float64)
+
+            # Binary presence matrix: token t present in doc d  →  (t_batch, d_batch)
+            P = (tok_X_cols[d_start:d_end] > 0).T.toarray().astype(np.float64)
+
+            # Mask: exclude token–doc pairs where token is absent
+            masked = sims * P                               # (t_batch, d_batch)
+
+            # Accumulate TI: (t_batch, d_batch) @ (d_batch, n_clusters) → (t_batch, n_clusters)
+            ti_matrix[t_start:t_end] += masked @ d_mem
+
+    # Rank clusters per token descending by TI (rank 1 = highest TI)
+    rank_matrix = np.argsort(np.argsort(-ti_matrix, axis=1), axis=1) + 1  # (n_vocab, n_clusters)
+
+    # Adjusted TI: TIadj(t, c) = TI(t, c) × (1 / rank_t,c)
+    tiadj_matrix = ti_matrix * (1.0 / rank_matrix)         # (n_vocab, n_clusters)
+
+    # Build output DataFrame (same schema as ctfi_df)
+    rows = []
+    for c in range(n_clusters):
+        nonzero = np.where(ti_matrix[:, c] > 0.0)[0]
+        if len(nonzero) == 0:
+            continue
+        tiadj_col = tiadj_matrix[nonzero, c]
+        order = np.argsort(-tiadj_col)[:TOP_K_TERMS]
+        for rank_i, pos in enumerate(order, start=1):
+            t_idx = nonzero[pos]
+            rows.append((int(c), vocab[t_idx], float(tiadj_matrix[t_idx, c]), rank_i))
+
+    return pd.DataFrame(rows, columns=["cluster_id", "term", "score", "rank"])
+
+
 def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: int) -> np.ndarray:
     if "gender_std" not in idx.columns:
         return np.zeros(len(idx), dtype=bool)
@@ -409,7 +686,33 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
     sample_embs = embs_seg[sample_idx]
     sample_texts = idx_seg.iloc[sample_idx]["body_norm"].astype(str).tolist()
 
-    if USE_BERTOPIC_GUIDED and seed_topic_list:
+    full_membership = None  # (n_docs, n_clusters) – populated only in fuzzy mode
+
+    if USE_FUZZY_BERTOPIC:
+        if USE_BERTOPIC_GUIDED and seed_topic_list:
+            # Discover cluster structure with guided BERTopic, then use that count for fuzzy c-means
+            guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
+            n_fuzzy_clusters = int(len(set(guided_labels[guided_labels >= 0])))
+            if n_fuzzy_clusters < 2:
+                warnings.warn(
+                    f"Guided BERTopic found <2 clusters for {seg_name}; "
+                    f"using FUZZY_N_CLUSTERS={FUZZY_N_CLUSTERS}"
+                )
+                n_fuzzy_clusters = FUZZY_N_CLUSTERS
+            mode = "fuzzy_bertopic_guided"
+        else:
+            n_fuzzy_clusters = FUZZY_N_CLUSTERS
+            mode = "fuzzy_bertopic"
+
+        sample_labels, _sample_membership, umap_model, cntr = cluster_with_fuzzy_cmeans(
+            sample_embs, n_fuzzy_clusters, FUZZY_M
+        )
+
+        if umap_model is not None and cntr is not None:
+            print(f"[segment:{seg_name}] predicting fuzzy membership for all {len(embs_seg)} docs...")
+            full_membership = _predict_fuzzy_membership_batched(embs_seg, umap_model, cntr, FUZZY_M)
+
+    elif USE_BERTOPIC_GUIDED and seed_topic_list:
         sample_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
         mode = "bertopic_guided"
     else:
@@ -427,6 +730,19 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
     out_assign["cluster_id"] = labels_all
     out_assign["cluster_sim"] = sim_all
     out_assign["cluster_margin"] = margin_all
+
+    # In fuzzy mode, store per-document top-3 membership values as paired
+    # (cluster_id, score) columns.  This is much more useful than the previous
+    # approach of storing globally-dominant cluster columns, which gave near-zero
+    # values for most documents whose primary cluster was not globally dominant.
+    if full_membership is not None:
+        top3_idx = np.argsort(-full_membership, axis=1)[:, :3]   # (n_docs, 3)
+        for rank_i, prefix in enumerate(["fuzzy_top1", "fuzzy_top2", "fuzzy_top3"]):
+            out_assign[f"{prefix}_cluster"] = top3_idx[:, rank_i].astype(np.int32)
+            out_assign[f"{prefix}_score"] = full_membership[
+                np.arange(len(full_membership)), top3_idx[:, rank_i]
+            ].astype(np.float32)
+
     out_assign = normalize_export_dtypes(out_assign)
 
     try:
@@ -445,9 +761,23 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
     }
 
     if texts_by_cluster:
-        kw = ctfi_df(texts_by_cluster, ngram_range=NGRAM_RANGE, min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
-        kw_uni = ctfi_df(texts_by_cluster, ngram_range=(1, 1), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
-        kw_bi = ctfi_df(texts_by_cluster, ngram_range=(2, 2), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
+        if USE_FUZZY_BERTOPIC and full_membership is not None:
+            # Use fuzzy term importance over the full segment (all docs, not just assigned).
+            # kw / kw_uni both carry the fuzzy TI scores (unigrams);
+            # kw_bi falls back to c-TF-IDF bigrams for supplementary catalog column.
+            all_texts_stripped = [
+                strip_greeting(s) for s in idx_seg["body_norm"].astype(str).tolist()
+            ]
+            kw = fuzzy_term_importance(all_texts_stripped, embs_seg, full_membership)
+            kw_uni = kw.copy()
+            kw_bi = ctfi_df(
+                texts_by_cluster, ngram_range=(2, 2), min_df=MIN_DF,
+                stop_words=STOP_WORDS, top_k=TOP_K_TERMS,
+            )
+        else:
+            kw = ctfi_df(texts_by_cluster, ngram_range=NGRAM_RANGE, min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
+            kw_uni = ctfi_df(texts_by_cluster, ngram_range=(1, 1), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
+            kw_bi = ctfi_df(texts_by_cluster, ngram_range=(2, 2), min_df=MIN_DF, stop_words=STOP_WORDS, top_k=TOP_K_TERMS)
     else:
         kw = pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
         kw_uni = kw.copy()
@@ -496,6 +826,12 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
         "guided_topics_loaded": len(seed_topic_list),
         "guided_topic_labels": seed_labels,
         "age_split_note": "Exact 13-15/16-20 requires numeric age column. age_group fallback is approximate.",
+        "fuzzy": {
+            "enabled": USE_FUZZY_BERTOPIC,
+            "n_clusters": FUZZY_N_CLUSTERS if USE_FUZZY_BERTOPIC else None,
+            "m": FUZZY_M if USE_FUZZY_BERTOPIC else None,
+            "membership_stored": full_membership is not None,
+        },
     }
     with open(outdir / "clustering_run_params.json", "w", encoding="utf-8") as f:
         json.dump(params, f, ensure_ascii=False, indent=2)
@@ -509,6 +845,7 @@ def main() -> None:
     embs = load_all_embeddings(outdir, SHARD_PREFIX)
     idx = load_aligned_index(outdir)
     idx = reconcile_index_length(outdir, idx, len(embs))
+    idx = enrich_with_exact_age(idx, outdir)
     if "body_norm" not in idx.columns:
         raise ValueError("Index is missing body_norm column")
 
@@ -518,7 +855,7 @@ def main() -> None:
     if RUN_SEGMENTED:
         base = outdir / SEGMENT_OUTPUT_SUBDIR
         base.mkdir(parents=True, exist_ok=True)
-        for seg in SEGMENTS:
+        for seg in _tqdm(SEGMENTS, desc="segments", unit="seg"):
             mask = build_segment_mask(idx, seg["gender"], seg["age_min"], seg["age_max"])
             idx_seg = idx.loc[mask].reset_index(drop=True)
             embs_seg = embs[mask]

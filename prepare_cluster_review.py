@@ -17,6 +17,7 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 DEFAULT_OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\outputs"
@@ -98,18 +99,325 @@ def write_labels_template(overview: pd.DataFrame, review_dir: Path) -> None:
     labels.to_csv(review_dir / "labels_template.csv", index=False, encoding="utf-8")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Create folder-based files for cluster review and labeling.")
-    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--assignments", default=DEFAULT_ASSIGNMENTS, help="Parquet file inside output-dir")
-    parser.add_argument("--review-dir", default=DEFAULT_REVIEW_DIR, help="Folder (inside output-dir) for review package")
-    parser.add_argument("--sample-per-cluster", type=int, default=50)
-    parser.add_argument("--sample-unclustered", type=int, default=500)
-    args = parser.parse_args()
+# ---------------------------------------------------------------------------
+# Fuzzy BERTopic helpers
+# ---------------------------------------------------------------------------
 
-    outdir = Path(args.output_dir)
-    assign_path = outdir / args.assignments
-    review_dir = outdir / args.review_dir
+def detect_fuzzy_columns(df: pd.DataFrame) -> bool:
+    """Return True if the parquet was produced by fuzzy BERTopic (new per-doc schema)."""
+    return "fuzzy_top1_cluster" in df.columns
+
+
+def build_fuzzy_doc_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Build a normalised fuzzy view from the per-document top-3 paired columns.
+
+    Expected parquet columns (written by bottom_up_clustering.py fuzzy mode):
+        fuzzy_top1_cluster, fuzzy_top1_score
+        fuzzy_top2_cluster, fuzzy_top2_score
+        fuzzy_top3_cluster, fuzzy_top3_score
+
+    Derived columns added:
+        primary_cluster / primary_membership  – rank-1 cluster and its score
+        second_cluster  / second_membership   – rank-2
+        third_cluster   / third_membership    – rank-3
+        is_boundary_doc                       – True when primary_membership < 0.5
+    """
+    out = df[["body_norm", "cluster_id", "cluster_sim", "cluster_margin"]].copy()
+
+    rank_map = [("primary", "fuzzy_top1"), ("second", "fuzzy_top2"), ("third", "fuzzy_top3")]
+    for out_prefix, src_prefix in rank_map:
+        cid_col   = f"{src_prefix}_cluster"
+        score_col = f"{src_prefix}_score"
+        out[f"{out_prefix}_cluster"]    = df[cid_col].astype(int)   if cid_col   in df.columns else -1
+        out[f"{out_prefix}_membership"] = df[score_col].astype(float) if score_col in df.columns else np.nan
+
+    out["is_boundary_doc"] = out["primary_membership"] < 0.5
+    return out
+
+
+def write_fuzzy_cluster_samples(
+    fuzzy_df: pd.DataFrame,
+    review_dir: Path,
+    sample_size: int = 100,
+) -> None:
+    """Write sample_fuzzy.csv into each cluster_{XXXX}/ folder that already exists.
+
+    Rows are sorted so the most ambiguous documents (is_boundary_doc=True, lowest
+    primary_membership) appear first – ideal for manual inspection.
+    """
+    cols = [
+        "body_norm",
+        "primary_cluster", "primary_membership",
+        "second_cluster", "second_membership",
+        "third_cluster", "third_membership",
+        "is_boundary_doc",
+    ]
+    if "matched_topic_terms" in fuzzy_df.columns:
+        cols.append("matched_topic_terms")
+    for cid, grp in fuzzy_df.groupby("cluster_id"):
+        cdir = review_dir / cluster_folder_name(int(cid))
+        if not cdir.exists():
+            continue
+        sample = (
+            grp.sort_values(
+                ["is_boundary_doc", "primary_membership"],
+                ascending=[False, True],
+            )
+            .head(sample_size)[cols]
+        )
+        sample.to_csv(cdir / "sample_fuzzy.csv", index=False, encoding="utf-8")
+
+
+def write_boundary_documents(fuzzy_df: pd.DataFrame, fuzzy_dir: Path) -> int:
+    """Write boundary_documents.csv (primary_membership < 0.5) with a summary header."""
+    cols = [
+        "body_norm",
+        "primary_cluster", "primary_membership",
+        "second_cluster", "second_membership",
+        "third_cluster", "third_membership",
+    ]
+    boundary = (
+        fuzzy_df[fuzzy_df["is_boundary_doc"]]
+        .sort_values("primary_membership", ascending=True)[cols]
+        .copy()
+    )
+    n_boundary = len(boundary)
+    n_total = len(fuzzy_df)
+    pct = 100.0 * n_boundary / n_total if n_total else 0.0
+
+    out_path = fuzzy_dir / "boundary_documents.csv"
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(f"# {n_boundary} boundary documents out of {n_total} total ({pct:.1f}%)\n")
+        boundary.to_csv(fh, index=False)
+
+    return n_boundary
+
+
+def write_cluster_overlap_matrix(fuzzy_df: pd.DataFrame, fuzzy_dir: Path) -> None:
+    """Write a symmetric cluster overlap matrix and print the top-10 overlapping pairs.
+
+    Entry [i, j] = number of documents where clusters i and j appear together in
+    the top-2 memberships (in either order), restricted to clusters that are
+    primary for at least 10 documents.
+    """
+    # Determine eligible cluster IDs (primary for ≥10 docs)
+    primary_counts = fuzzy_df["primary_cluster"].value_counts()
+    eligible = sorted(primary_counts[primary_counts >= 10].index.tolist())
+    if len(eligible) < 2:
+        print("[fuzzy] not enough eligible clusters for overlap matrix – skipping")
+        return
+
+    cid_to_idx = {cid: i for i, cid in enumerate(eligible)}
+    n = len(eligible)
+    matrix = np.zeros((n, n), dtype=np.int32)
+
+    for _, row in fuzzy_df.iterrows():
+        pc = int(row["primary_cluster"])
+        sc = int(row["second_cluster"]) if row["second_cluster"] >= 0 else -1
+        if pc in cid_to_idx and sc in cid_to_idx and pc != sc:
+            i, j = cid_to_idx[pc], cid_to_idx[sc]
+            matrix[i, j] += 1
+            matrix[j, i] += 1   # symmetrise
+
+    overlap_df = pd.DataFrame(matrix, index=eligible, columns=eligible)
+    overlap_df.index.name = "cluster_id"
+    overlap_df.to_csv(fuzzy_dir / "cluster_overlap_matrix.csv", encoding="utf-8")
+
+    # Print top-10 pairs (upper triangle only to avoid duplicates)
+    pairs = []
+    for ii in range(n):
+        for jj in range(ii + 1, n):
+            if matrix[ii, jj] > 0:
+                pairs.append((eligible[ii], eligible[jj], int(matrix[ii, jj])))
+    pairs.sort(key=lambda x: -x[2])
+    print("[fuzzy] top-10 overlapping cluster pairs (symmetric co-occurrence):")
+    for ci, cj, cnt in pairs[:10]:
+        print(f"  clusters {ci:4d} ↔ {cj:4d} : {cnt} docs")
+
+
+def write_multi_topic_examples(fuzzy_df: pd.DataFrame, fuzzy_dir: Path, top_n: int = 50) -> None:
+    """Write the clearest multi-topic documents (both top-2 memberships > 0.3)."""
+    cols = [
+        "body_norm",
+        "primary_cluster", "primary_membership",
+        "second_cluster", "second_membership",
+    ]
+    multi = (
+        fuzzy_df[
+            (fuzzy_df["primary_membership"] > 0.3)
+            & (fuzzy_df["second_membership"] > 0.3)
+        ]
+        .sort_values("second_membership", ascending=False)
+        .head(top_n)[cols]
+        .copy()
+    )
+    multi.to_csv(fuzzy_dir / "multi_topic_examples.csv", index=False, encoding="utf-8")
+    print(f"[fuzzy] {len(multi)} multi-topic examples written (top-2 memberships both > 0.3)")
+
+
+def enrich_overview_with_fuzzy(overview: pd.DataFrame, fuzzy_df: pd.DataFrame) -> pd.DataFrame:
+    """Add fuzzy summary columns to the cluster overview DataFrame."""
+    rows = []
+    for cid, grp in fuzzy_df.groupby("cluster_id"):
+        mean_pm = float(grp["primary_membership"].mean())
+        boundary_count = int((grp["primary_membership"] < 0.5).sum())
+        sec_mode = grp["second_cluster"].mode()
+        most_common_sec = int(sec_mode.iloc[0]) if len(sec_mode) > 0 else -1
+        rows.append({
+            "cluster_id": int(cid),
+            "mean_primary_membership": round(mean_pm, 4),
+            "boundary_doc_count": boundary_count,
+            "most_common_secondary": most_common_sec,
+        })
+
+    fuzzy_stats = pd.DataFrame(rows)
+    return overview.merge(fuzzy_stats, on="cluster_id", how="left")
+
+
+def load_cluster_keywords(assign_path: Path) -> "pd.DataFrame | None":
+    """Load clusters_keywords.csv from the same directory as the assignments parquet.
+
+    Returns None (with a warning print) if the file is absent or malformed.
+    """
+    kw_path = assign_path.parent / "clusters_keywords.csv"
+    if not kw_path.exists():
+        print(f"[fuzzy] clusters_keywords.csv not found at {kw_path}; skipping topic-word outputs")
+        return None
+    try:
+        kw = pd.read_csv(kw_path)
+        required = {"cluster_id", "term", "score", "rank"}
+        if not required.issubset(kw.columns):
+            print(f"[fuzzy] clusters_keywords.csv missing columns {required - set(kw.columns)}; skipping")
+            return None
+        return kw
+    except Exception as exc:
+        print(f"[fuzzy] could not load clusters_keywords.csv: {exc}; skipping topic-word outputs")
+        return None
+
+
+def add_matched_topic_terms(
+    fuzzy_df: pd.DataFrame,
+    kw_df: pd.DataFrame,
+    top_n: int = 5,
+) -> pd.DataFrame:
+    """Return fuzzy_df with a new matched_topic_terms column.
+
+    For each document the column contains the top-N TIadj terms for the
+    document's primary (rank-1 fuzzy) cluster, comma-separated.  Documents
+    whose primary cluster is not in the keyword file get an empty string.
+    """
+    top_terms = (
+        kw_df.sort_values("rank")
+        .groupby("cluster_id")["term"]
+        .apply(lambda s: ", ".join(s.head(top_n).tolist()))
+        .to_dict()
+    )
+    out = fuzzy_df.copy()
+    out["matched_topic_terms"] = out["primary_cluster"].map(top_terms).fillna("")
+    return out
+
+
+def write_fuzzy_topic_words(
+    kw_df: pd.DataFrame,
+    fuzzy_df: pd.DataFrame,
+    review_dir: Path,
+    top_n: int = 30,
+) -> None:
+    """Write topic_words_fuzzy.csv into each cluster_{XXXX}/ folder.
+
+    Columns
+    -------
+    TIadj_rank        – rank by TIadj score within this cluster (1 = best)
+    term              – vocabulary token
+    TIadj_score       – fuzzy term importance adjusted score
+    present_in_N_docs – count of hard-assigned docs in this cluster containing the term
+    freq_rank         – rank by present_in_N_docs descending (1 = most frequent)
+    rank_diff         – TIadj_rank − freq_rank  (negative = TIadj promotes above raw freq;
+                        positive = TIadj demotes below raw freq)
+    """
+    clustered = fuzzy_df[fuzzy_df["cluster_id"] >= 0].copy()
+
+    for cid, cluster_kw in kw_df.groupby("cluster_id"):
+        cdir = review_dir / cluster_folder_name(int(cid))
+        if not cdir.exists():
+            continue
+
+        top_kw = cluster_kw.sort_values("rank").head(top_n).copy()
+        cluster_texts = clustered[clustered["cluster_id"] == cid]["body_norm"].astype(str)
+
+        top_kw["present_in_N_docs"] = top_kw["term"].apply(
+            lambda t: int(cluster_texts.str.contains(t, case=False, na=False, regex=False).sum())
+        )
+        top_kw["freq_rank"] = (
+            top_kw["present_in_N_docs"].rank(ascending=False, method="min").astype(int)
+        )
+        top_kw["rank_diff"] = top_kw["rank"] - top_kw["freq_rank"]
+
+        (
+            top_kw[["rank", "term", "score", "present_in_N_docs", "freq_rank", "rank_diff"]]
+            .rename(columns={"rank": "TIadj_rank", "score": "TIadj_score"})
+            .to_csv(cdir / "topic_words_fuzzy.csv", index=False, encoding="utf-8")
+        )
+
+
+def write_topic_word_comparison(
+    kw_df: pd.DataFrame,
+    fuzzy_df: pd.DataFrame,
+    overview: pd.DataFrame,
+    fuzzy_dir: Path,
+) -> None:
+    """Write cluster_review/fuzzy/topic_word_comparison.csv.
+
+    For each cluster, compares the top-5 TIadj terms (fuzzy method) against
+    the top-5 terms by raw document frequency within the cluster (hard baseline).
+    Sorted by overlap_count ascending so the clusters where the two methods
+    disagree most appear at the top — those are the most informative cases.
+
+    Columns
+    -------
+    cluster_id        – cluster identifier
+    size              – number of hard-assigned documents
+    top5_fuzzy_terms  – top 5 terms by TIadj score
+    top5_ctfidf_terms – top 5 terms by raw doc frequency (hard-method proxy)
+    overlap_count     – terms appearing in both lists (0 = fully different rankings)
+    """
+    clustered = fuzzy_df[fuzzy_df["cluster_id"] >= 0].copy()
+    rows = []
+
+    for _, ov_row in overview.iterrows():
+        cid = int(ov_row["cluster_id"])
+        size = int(ov_row.get("size", 0))
+
+        cluster_kw = kw_df[kw_df["cluster_id"] == cid].sort_values("rank")
+        fuzzy_terms = cluster_kw.head(5)["term"].tolist()
+        vocab = cluster_kw["term"].tolist()
+
+        cluster_texts = clustered[clustered["cluster_id"] == cid]["body_norm"].astype(str)
+
+        if vocab and len(cluster_texts) > 0:
+            freq = {
+                t: int(cluster_texts.str.contains(t, case=False, na=False, regex=False).sum())
+                for t in vocab
+            }
+            freq_terms = sorted(freq, key=lambda x: -freq[x])[:5]
+        else:
+            freq_terms = []
+
+        rows.append({
+            "cluster_id": cid,
+            "size": size,
+            "top5_fuzzy_terms": ", ".join(fuzzy_terms),
+            "top5_ctfidf_terms": ", ".join(freq_terms),
+            "overlap_count": len(set(fuzzy_terms) & set(freq_terms)),
+        })
+
+    result = pd.DataFrame(rows).sort_values("overlap_count", ascending=True)
+    result.to_csv(fuzzy_dir / "topic_word_comparison.csv", index=False, encoding="utf-8")
+    print(f"[fuzzy] topic_word_comparison.csv written ({len(rows)} clusters)")
+
+
+def _run_review(assign_path: Path, review_dir: Path, args) -> dict:
+    """Run the full review pipeline for a single assignments parquet file."""
     review_dir.mkdir(parents=True, exist_ok=True)
 
     if not assign_path.exists():
@@ -118,7 +426,43 @@ def main() -> None:
     df = pd.read_parquet(assign_path)
     df = sanitize_columns(df)
 
+    # --- Auto-detect fuzzy mode ---
+    has_fuzzy = detect_fuzzy_columns(df)
+    is_fuzzy = has_fuzzy and not args.skip_fuzzy
+    if has_fuzzy and args.skip_fuzzy:
+        print("[mode] fuzzy columns detected but --skip-fuzzy was set; running in standard mode")
+    elif is_fuzzy:
+        print("[mode] fuzzy BERTopic detected (fuzzy_top1/2/3_cluster+score); fuzzy outputs → fuzzy/")
+    else:
+        print("[mode] standard (no fuzzy_membership_* columns found)")
+
+    # --- Existing outputs (unchanged) ---
     overview = write_cluster_files(df, review_dir, sample_per_cluster=args.sample_per_cluster)
+
+    n_boundary = 0
+    fuzzy_dir_path = None
+
+    if is_fuzzy:
+        fuzzy_df = build_fuzzy_doc_frame(df)
+
+        kw_df = load_cluster_keywords(assign_path)
+        if kw_df is not None:
+            fuzzy_df = add_matched_topic_terms(fuzzy_df, kw_df)
+
+        overview = enrich_overview_with_fuzzy(overview, fuzzy_df)
+
+        fuzzy_dir_path = review_dir / "fuzzy"
+        fuzzy_dir_path.mkdir(parents=True, exist_ok=True)
+
+        write_fuzzy_cluster_samples(fuzzy_df, review_dir, sample_size=100)
+        n_boundary = write_boundary_documents(fuzzy_df, fuzzy_dir_path)
+        write_cluster_overlap_matrix(fuzzy_df, fuzzy_dir_path)
+        write_multi_topic_examples(fuzzy_df, fuzzy_dir_path)
+
+        if kw_df is not None:
+            write_fuzzy_topic_words(kw_df, fuzzy_df, review_dir)
+            write_topic_word_comparison(kw_df, fuzzy_df, overview, fuzzy_dir_path)
+
     overview.to_csv(review_dir / "cluster_overview.csv", index=False, encoding="utf-8")
 
     n_unclustered = write_unclustered(df, review_dir, sample_unclustered=args.sample_unclustered)
@@ -132,11 +476,70 @@ def main() -> None:
         "n_unclustered": int(n_unclustered),
         "sample_per_cluster": int(args.sample_per_cluster),
         "sample_unclustered": int(args.sample_unclustered),
+        "fuzzy_mode": is_fuzzy,
+        "n_boundary_docs": n_boundary if is_fuzzy else None,
+        "boundary_pct": round(100.0 * n_boundary / len(df), 2) if is_fuzzy and len(df) else None,
+        "fuzzy_output_dir": str(fuzzy_dir_path) if fuzzy_dir_path else None,
     }
     with open(review_dir / "review_manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return manifest
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Create folder-based files for cluster review and labeling.")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--assignments", default=DEFAULT_ASSIGNMENTS, help="Parquet filename inside output-dir (ignored when --segment or --all-segments is used)")
+    parser.add_argument("--review-dir", default=DEFAULT_REVIEW_DIR, help="Review subfolder name (relative to the resolved output dir)")
+    parser.add_argument("--sample-per-cluster", type=int, default=50)
+    parser.add_argument("--sample-unclustered", type=int, default=500)
+    parser.add_argument("--skip-fuzzy", action="store_true", help="Skip fuzzy outputs even if fuzzy columns are present")
+    parser.add_argument(
+        "--segment",
+        default=None,
+        metavar="NAME",
+        help="Process one segment by name, e.g. girls_16_20. "
+             "Reads from <output-dir>/segments/<NAME>/A_cluster_assignments.parquet "
+             "and writes review to <output-dir>/segments/<NAME>/<review-dir>/",
+    )
+    parser.add_argument(
+        "--all-segments",
+        action="store_true",
+        help="Auto-discover and process every segment folder under <output-dir>/segments/",
+    )
+    args = parser.parse_args()
+
+    outdir = Path(args.output_dir)
+
+    if args.all_segments:
+        seg_base = outdir / "segments"
+        seg_dirs = sorted(p.parent for p in seg_base.glob(f"*/{DEFAULT_ASSIGNMENTS}"))
+        if not seg_dirs:
+            raise FileNotFoundError(f"No segment outputs found under {seg_base}")
+        for seg_dir in seg_dirs:
+            print(f"\n{'='*60}\n  Segment: {seg_dir.name}\n{'='*60}")
+            _run_review(
+                assign_path=seg_dir / DEFAULT_ASSIGNMENTS,
+                review_dir=seg_dir / args.review_dir,
+                args=args,
+            )
+
+    elif args.segment:
+        seg_dir = outdir / "segments" / args.segment
+        _run_review(
+            assign_path=seg_dir / DEFAULT_ASSIGNMENTS,
+            review_dir=seg_dir / args.review_dir,
+            args=args,
+        )
+
+    else:
+        _run_review(
+            assign_path=outdir / args.assignments,
+            review_dir=outdir / args.review_dir,
+            args=args,
+        )
 
 
 if __name__ == "__main__":
