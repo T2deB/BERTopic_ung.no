@@ -1,0 +1,32 @@
+# Output data — large files, not tracked by git
+# The outputs/ folder lives in Positron_project/, but ignore any local copies too
+outputs/
+*.parquet
+*.npz
+*.npy
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+*.swp
+
+# Claude Code internal
+.claude/
+
+# guided_topics_*.json files in this directory are intentionally tracked by git.
+# Do NOT add a pattern that would ignore them.

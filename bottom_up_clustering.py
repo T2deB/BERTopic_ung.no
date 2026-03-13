@@ -40,6 +40,8 @@ except ImportError:
 # ---------------------------
 # CONFIG
 # ---------------------------
+SCRIPT_DIR = Path(__file__).parent   # folder containing the .py files (tracked by git)
+
 OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\outputs"
 SHARD_PREFIX = "bodynorm"
 A_EMB_FILE = "A_embeddings.npz"
@@ -47,7 +49,15 @@ A_INDEX_FILE = "C_candidates_index.parquet"
 AGE_LOOKUP_FILE = "C_index.parquet"   # optional; provides exact numeric age column
 LATE_ROWS_FILE = "late_arrivals_body_norm.csv"
 
-GUIDED_TOPICS_JSON = "guided_topics.json"
+# Per-segment guided-topic files live in SCRIPT_DIR so they are tracked by git.
+# The "_default" entry is used for unknown segment names and for the non-segmented run.
+GUIDED_TOPICS_FILES = {
+    "boys_13_15":  "guided_topics_boys_13_15.json",
+    "boys_16_20":  "guided_topics_boys_16_20.json",
+    "girls_13_15": "guided_topics_girls_13_15.json",
+    "girls_16_20": "guided_topics_girls_16_20.json",
+    "_default":    "guided_topics.json",
+}
 USE_BERTOPIC_GUIDED = True
 
 # Fuzzy BERTopic (Nikbakht & Zojaji, 2026)
@@ -547,12 +557,21 @@ def fuzzy_term_importance(
     DataFrame with columns [cluster_id, term, score, rank]  – same format as ctfi_df()
     """
     n_docs, n_clusters = membership_matrix.shape
+    print(f"[fuzzy_ti] input: n_docs={n_docs}, n_clusters={n_clusters}, embs.shape={embs.shape}")
 
     if n_docs > 10_000:
         warnings.warn(
             f"[fuzzy_term_importance] corpus has {n_docs} docs (>10 000); "
             "computation may be slow – consider sampling first."
         )
+
+    # Cluster size diagnostics (hard assignment via argmax)
+    hard_assign = np.argmax(membership_matrix, axis=1)
+    cluster_sizes = np.bincount(hard_assign, minlength=n_clusters)
+    min_cluster_size = int(cluster_sizes[cluster_sizes > 0].min()) if cluster_sizes.any() else 0
+    print(f"[fuzzy_ti] cluster sizes: min={min_cluster_size}, max={int(cluster_sizes.max())}, "
+          f"mean={cluster_sizes[cluster_sizes > 0].mean():.0f}, "
+          f"empty clusters={int((cluster_sizes == 0).sum())}")
 
     # Load embedding model if not provided
     if embedding_model is None:
@@ -567,10 +586,15 @@ def fuzzy_term_importance(
             )
             return pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
 
-    # Build vocabulary with the same tokeniser settings as ctfi_df
+    # Build vocabulary — lower min_df for small segments
+    # If the smallest non-empty cluster has < 500 docs, min_df=3 avoids filtering everything out
+    effective_min_df = 3 if min_cluster_size < 500 else MIN_DF
+    print(f"[fuzzy_ti] building vocab: min_df={effective_min_df} (MIN_DF={MIN_DF}, "
+          f"min_cluster_size={min_cluster_size}), stop_words={len(STOP_WORDS)}")
+
     vect = CountVectorizer(
         ngram_range=(1, 1),
-        min_df=MIN_DF,
+        min_df=effective_min_df,
         max_df=0.6,
         stop_words=STOP_WORDS,
         lowercase=True,
@@ -580,21 +604,53 @@ def fuzzy_term_importance(
     X = vect.fit_transform(texts)        # (n_docs, n_vocab) sparse CSR
     vocab = vect.get_feature_names_out()
     n_vocab = len(vocab)
-    print(f"[fuzzy_ti] vocab={n_vocab}, docs={n_docs}, clusters={n_clusters}")
+    total_tokens_raw = X.sum()
+    print(f"[fuzzy_ti] vocab after CountVectorizer: {n_vocab} unique tokens, "
+          f"{int(total_tokens_raw)} total token occurrences in corpus")
 
     if n_vocab == 0:
+        print("[fuzzy_ti] WARNING: vocab is empty after filtering — all terms removed by "
+              f"min_df={effective_min_df} + stopwords. Returning empty DataFrame.")
         return pd.DataFrame(columns=["cluster_id", "term", "score", "rank"])
 
+    # Sanity check: show 10 sample tokens so we can confirm the tokeniser is working
+    sample_tokens = vocab[:10].tolist()
+    print(f"[fuzzy_ti] sample vocab (first 10): {sample_tokens}")
+
     # Embed all vocabulary tokens
+    print(f"[fuzzy_ti] encoding {n_vocab} vocabulary tokens...")
     token_embs = np.array(
         embedding_model.encode(
             vocab.tolist(), batch_size=256, show_progress_bar=True, normalize_embeddings=True
         ),
         dtype=np.float32,
     )  # (n_vocab, dim)
+    print(f"[fuzzy_ti] token_embs.shape={token_embs.shape}, "
+          f"norm range=[{np.linalg.norm(token_embs, axis=1).min():.3f}, "
+          f"{np.linalg.norm(token_embs, axis=1).max():.3f}]")
 
     # Ensure doc embeddings are L2-normalised
     embs_norm = l2norm(embs.astype(np.float32).copy())  # (n_docs, dim)
+    print(f"[fuzzy_ti] embs_norm.shape={embs_norm.shape}")
+
+    # Dimension compatibility check — token_embs come from gte-multilingual-base;
+    # doc embeddings come from A_embeddings.npz.  If they were produced by different
+    # models their vector spaces are incompatible and cosine similarity will be ~0.
+    if token_embs.shape[1] != embs_norm.shape[1]:
+        warnings.warn(
+            f"[fuzzy_ti] DIMENSION MISMATCH: token_embs.dim={token_embs.shape[1]} "
+            f"vs doc_embs.dim={embs_norm.shape[1]}. "
+            f"A_embeddings.npz was built with a different model than "
+            f"gte-multilingual-base — cosine similarity is undefined. "
+            f"Falling back to c-TF-IDF."
+        )
+        texts_by_cluster_fb: Dict[int, List[str]] = {}
+        for doc_i, c_i in enumerate(hard_assign):
+            texts_by_cluster_fb.setdefault(int(c_i), []).append(texts[doc_i])
+        return ctfi_df(
+            texts_by_cluster_fb, ngram_range=(1, 1), min_df=effective_min_df,
+            stop_words=STOP_WORDS, top_k=TOP_K_TERMS,
+        )
 
     # CSC layout for efficient column (token) slicing inside the token batch loop
     X_csc = X.tocsc()
@@ -604,6 +660,8 @@ def fuzzy_term_importance(
     ti_matrix = np.zeros((n_vocab, n_clusters), dtype=np.float64)
 
     n_token_batches = -(-n_vocab // _FUZZY_TOKEN_BATCH)  # ceiling division
+    print(f"[fuzzy_ti] TI accumulation: {n_token_batches} token batches × "
+          f"{-(-n_docs // FUZZY_BATCH_SIZE)} doc batches")
     for t_start in _tqdm(
         range(0, n_vocab, _FUZZY_TOKEN_BATCH),
         desc="fuzzy TI (token batches)",
@@ -622,6 +680,18 @@ def fuzzy_term_importance(
             # Cosine similarities: (t_batch, d_batch)
             sims = (tok_embs_batch @ d_embs.T).astype(np.float64)
 
+            # On the very first mini-batch, verify similarities are non-trivial
+            if t_start == 0 and d_start == 0:
+                max_sim_first = float(np.abs(sims).max())
+                print(f"[fuzzy_ti] first-batch max |cosine_sim| = {max_sim_first:.4f} "
+                      f"(expected >0.1 if doc and token embeddings share the same model)")
+                if max_sim_first < 0.05:
+                    print(
+                        "[fuzzy_ti] WARNING: near-zero similarities — doc embeddings are likely "
+                        "from a different model than gte-multilingual-base. "
+                        "All TI scores will be ~0, and the c-TF-IDF fallback will run."
+                    )
+
             # Binary presence matrix: token t present in doc d  →  (t_batch, d_batch)
             P = (tok_X_cols[d_start:d_end] > 0).T.toarray().astype(np.float64)
 
@@ -631,11 +701,26 @@ def fuzzy_term_importance(
             # Accumulate TI: (t_batch, d_batch) @ (d_batch, n_clusters) → (t_batch, n_clusters)
             ti_matrix[t_start:t_end] += masked @ d_mem
 
+    # TI matrix diagnostics
+    ti_nonzero_per_cluster = (ti_matrix > 0.0).sum(axis=0)  # (n_clusters,)
+    print(f"[fuzzy_ti] TI matrix shape={ti_matrix.shape}, "
+          f"global max={ti_matrix.max():.4f}, global min_nonzero="
+          f"{ti_matrix[ti_matrix > 0].min():.6f if (ti_matrix > 0).any() else 'N/A'}")
+    print(f"[fuzzy_ti] non-zero TI tokens per cluster: "
+          f"min={int(ti_nonzero_per_cluster.min())}, "
+          f"max={int(ti_nonzero_per_cluster.max())}, "
+          f"mean={ti_nonzero_per_cluster.mean():.1f}, "
+          f"clusters with 0 tokens={int((ti_nonzero_per_cluster == 0).sum())}")
+
     # Rank clusters per token descending by TI (rank 1 = highest TI)
     rank_matrix = np.argsort(np.argsort(-ti_matrix, axis=1), axis=1) + 1  # (n_vocab, n_clusters)
 
     # Adjusted TI: TIadj(t, c) = TI(t, c) × (1 / rank_t,c)
     tiadj_matrix = ti_matrix * (1.0 / rank_matrix)         # (n_vocab, n_clusters)
+    tiadj_nonzero_per_cluster = (tiadj_matrix > 0.0).sum(axis=0)
+    print(f"[fuzzy_ti] TIadj matrix shape={tiadj_matrix.shape}, "
+          f"non-zero TIadj tokens per cluster: min={int(tiadj_nonzero_per_cluster.min())}, "
+          f"max={int(tiadj_nonzero_per_cluster.max())}")
 
     # Build output DataFrame (same schema as ctfi_df)
     rows = []
@@ -649,7 +734,29 @@ def fuzzy_term_importance(
             t_idx = nonzero[pos]
             rows.append((int(c), vocab[t_idx], float(tiadj_matrix[t_idx, c]), rank_i))
 
-    return pd.DataFrame(rows, columns=["cluster_id", "term", "score", "rank"])
+    result = pd.DataFrame(rows, columns=["cluster_id", "term", "score", "rank"])
+    print(f"[fuzzy_ti] output: {len(result)} rows, {result['cluster_id'].nunique()} clusters with terms")
+
+    # Safety net: if TIadj produced nothing, fall back to c-TF-IDF on hard cluster assignments
+    if result.empty:
+        warnings.warn(
+            "[fuzzy_ti] TIadj output is empty — all TI scores are zero. "
+            "This likely means the embedding model token similarities are all near-zero, "
+            "or there is a dtype/shape mismatch. Falling back to c-TF-IDF on hard assignments."
+        )
+        texts_by_cluster: Dict[int, List[str]] = {}
+        for doc_i, c in enumerate(hard_assign):
+            texts_by_cluster.setdefault(int(c), []).append(texts[doc_i])
+        result = ctfi_df(
+            texts_by_cluster,
+            ngram_range=(1, 1),
+            min_df=effective_min_df,
+            stop_words=STOP_WORDS,
+            top_k=TOP_K_TERMS,
+        )
+        print(f"[fuzzy_ti] c-TF-IDF fallback produced {len(result)} rows")
+
+    return result
 
 
 def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: int) -> np.ndarray:
@@ -671,7 +778,17 @@ def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: in
     return (gmask & amask).to_numpy()
 
 
-def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg: np.ndarray, seed_labels: List[str], seed_topic_list: List[List[str]]) -> None:
+def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg: np.ndarray) -> None:
+    # Load per-segment guided topics from SCRIPT_DIR (git-tracked)
+    filename = GUIDED_TOPICS_FILES.get(seg_name, GUIDED_TOPICS_FILES["_default"])
+    topics_path = SCRIPT_DIR / filename
+    if not topics_path.exists() and filename != GUIDED_TOPICS_FILES["_default"]:
+        print(f"[{seg_name}] No segment-specific file ({filename}), "
+              f"falling back to {GUIDED_TOPICS_FILES['_default']}")
+        topics_path = SCRIPT_DIR / GUIDED_TOPICS_FILES["_default"]
+    seed_labels, seed_topic_list = load_guided_topics(topics_path)
+    print(f"[{seg_name}] Loaded {len(seed_topic_list)} seed topics from {topics_path.name}")
+
     print(f"\n[segment] {seg_name} | N={len(idx_seg)}")
     if len(idx_seg) < max(HDBSCAN_MIN_CLUSTER_SIZE * 3, 1000):
         warnings.warn(f"Segment {seg_name} too small; skipping")
@@ -769,6 +886,17 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
                 strip_greeting(s) for s in idx_seg["body_norm"].astype(str).tolist()
             ]
             kw = fuzzy_term_importance(all_texts_stripped, embs_seg, full_membership)
+            if kw.empty:
+                # fuzzy_term_importance already tried its own internal fallback;
+                # this outer guard ensures we always have keyword output.
+                warnings.warn(
+                    f"[segment:{seg_name}] fuzzy_term_importance returned empty even "
+                    f"after internal fallback — running c-TF-IDF as final safety net"
+                )
+                kw = ctfi_df(
+                    texts_by_cluster, ngram_range=(1, 1), min_df=MIN_DF,
+                    stop_words=STOP_WORDS, top_k=TOP_K_TERMS,
+                )
             kw_uni = kw.copy()
             kw_bi = ctfi_df(
                 texts_by_cluster, ngram_range=(2, 2), min_df=MIN_DF,
@@ -816,13 +944,14 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
         "n_assigned": int((labels_all >= 0).sum()),
         "n_noise": int((labels_all < 0).sum()),
         "files": {
-            "guided_topics_json": str(Path(OUTPUT_DIR) / GUIDED_TOPICS_JSON),
+            "guided_topics_file": str(topics_path),
             "clusters_keywords": str(outdir / "clusters_keywords.csv"),
             "clusters_keywords_unigrams": str(outdir / "clusters_keywords_unigrams.csv"),
             "clusters_keywords_bigrams": str(outdir / "clusters_keywords_bigrams.csv"),
         },
         "sampling": {"size": SAMPLE_SIZE, "min_per_stratum": MIN_PER_STRATUM, "seed": SAMPLE_RANDOM_STATE},
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
+        "guided_topics_file": str(topics_path),
         "guided_topics_loaded": len(seed_topic_list),
         "guided_topic_labels": seed_labels,
         "age_split_note": "Exact 13-15/16-20 requires numeric age column. age_group fallback is approximate.",
@@ -849,9 +978,6 @@ def main() -> None:
     if "body_norm" not in idx.columns:
         raise ValueError("Index is missing body_norm column")
 
-    seed_labels, seed_topic_list = load_guided_topics(outdir / GUIDED_TOPICS_JSON)
-    print(f"[seeds] loaded {len(seed_topic_list)} topics from {GUIDED_TOPICS_JSON}")
-
     if RUN_SEGMENTED:
         base = outdir / SEGMENT_OUTPUT_SUBDIR
         base.mkdir(parents=True, exist_ok=True)
@@ -861,9 +987,9 @@ def main() -> None:
             embs_seg = embs[mask]
             seg_out = base / seg["name"]
             seg_out.mkdir(parents=True, exist_ok=True)
-            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg, seed_labels, seed_topic_list)
+            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg)
     else:
-        run_one_segment("all", outdir, idx.reset_index(drop=True), embs, seed_labels, seed_topic_list)
+        run_one_segment("all", outdir, idx.reset_index(drop=True), embs)
 
     print("[done] clustering pipeline completed")
 

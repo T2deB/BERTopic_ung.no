@@ -24,6 +24,25 @@ DEFAULT_OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsme
 DEFAULT_ASSIGNMENTS = "A_cluster_assignments.parquet"
 DEFAULT_REVIEW_DIR = "cluster_review"
 
+# A document is a "boundary doc" when its primary fuzzy membership is less than
+# FUZZY_BOUNDARY_MULTIPLIER times the uniform-membership baseline (1/n_clusters).
+# 3× means: the document's primary cluster gets at least 3x its fair share.
+FUZZY_BOUNDARY_MULTIPLIER = 3
+
+
+def _best_age_cols(df: pd.DataFrame) -> list:
+    """Return the best available age column(s) as a list.
+
+    Prefers numeric ``age`` (written by enrich_with_exact_age in
+    bottom_up_clustering.py) over the interval string ``age_group``.
+    Returns an empty list when neither column is present.
+    """
+    if "age" in df.columns:
+        return ["age"]
+    if "age_group" in df.columns:
+        return ["age_group"]
+    return []
+
 
 def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -59,7 +78,8 @@ def write_cluster_files(df: pd.DataFrame, review_dir: Path, sample_per_cluster: 
         grp_sorted.to_csv(cdir / "questions.csv", index=False, encoding="utf-8")
 
         sample = grp_sorted.head(sample_per_cluster)
-        sample[["body_norm", "cluster_sim", "cluster_margin"]].to_csv(
+        age_cols = _best_age_cols(sample)
+        sample[["body_norm"] + age_cols + ["cluster_sim", "cluster_margin"]].to_csv(
             cdir / "sample_for_labeling.csv", index=False, encoding="utf-8"
         )
 
@@ -108,7 +128,7 @@ def detect_fuzzy_columns(df: pd.DataFrame) -> bool:
     return "fuzzy_top1_cluster" in df.columns
 
 
-def build_fuzzy_doc_frame(df: pd.DataFrame) -> pd.DataFrame:
+def build_fuzzy_doc_frame(df: pd.DataFrame, boundary_threshold: float = 0.5) -> pd.DataFrame:
     """Build a normalised fuzzy view from the per-document top-3 paired columns.
 
     Expected parquet columns (written by bottom_up_clustering.py fuzzy mode):
@@ -120,9 +140,11 @@ def build_fuzzy_doc_frame(df: pd.DataFrame) -> pd.DataFrame:
         primary_cluster / primary_membership  – rank-1 cluster and its score
         second_cluster  / second_membership   – rank-2
         third_cluster   / third_membership    – rank-3
-        is_boundary_doc                       – True when primary_membership < 0.5
+        is_boundary_doc                       – True when primary_membership < boundary_threshold
+                                                (data-driven: FUZZY_BOUNDARY_MULTIPLIER / n_clusters)
     """
-    out = df[["body_norm", "cluster_id", "cluster_sim", "cluster_margin"]].copy()
+    age_cols = _best_age_cols(df)
+    out = df[["body_norm", "cluster_id", "cluster_sim", "cluster_margin"] + age_cols].copy()
 
     rank_map = [("primary", "fuzzy_top1"), ("second", "fuzzy_top2"), ("third", "fuzzy_top3")]
     for out_prefix, src_prefix in rank_map:
@@ -131,7 +153,7 @@ def build_fuzzy_doc_frame(df: pd.DataFrame) -> pd.DataFrame:
         out[f"{out_prefix}_cluster"]    = df[cid_col].astype(int)   if cid_col   in df.columns else -1
         out[f"{out_prefix}_membership"] = df[score_col].astype(float) if score_col in df.columns else np.nan
 
-    out["is_boundary_doc"] = out["primary_membership"] < 0.5
+    out["is_boundary_doc"] = out["primary_membership"] < boundary_threshold
     return out
 
 
@@ -145,13 +167,17 @@ def write_fuzzy_cluster_samples(
     Rows are sorted so the most ambiguous documents (is_boundary_doc=True, lowest
     primary_membership) appear first – ideal for manual inspection.
     """
-    cols = [
-        "body_norm",
-        "primary_cluster", "primary_membership",
-        "second_cluster", "second_membership",
-        "third_cluster", "third_membership",
-        "is_boundary_doc",
-    ]
+    age_cols = _best_age_cols(fuzzy_df)
+    cols = (
+        ["body_norm"]
+        + age_cols
+        + [
+            "primary_cluster", "primary_membership",
+            "second_cluster", "second_membership",
+            "third_cluster", "third_membership",
+            "is_boundary_doc",
+        ]
+    )
     if "matched_topic_terms" in fuzzy_df.columns:
         cols.append("matched_topic_terms")
     for cid, grp in fuzzy_df.groupby("cluster_id"):
@@ -168,14 +194,23 @@ def write_fuzzy_cluster_samples(
         sample.to_csv(cdir / "sample_fuzzy.csv", index=False, encoding="utf-8")
 
 
-def write_boundary_documents(fuzzy_df: pd.DataFrame, fuzzy_dir: Path) -> int:
-    """Write boundary_documents.csv (primary_membership < 0.5) with a summary header."""
-    cols = [
-        "body_norm",
-        "primary_cluster", "primary_membership",
-        "second_cluster", "second_membership",
-        "third_cluster", "third_membership",
-    ]
+def write_boundary_documents(
+    fuzzy_df: pd.DataFrame,
+    fuzzy_dir: Path,
+    n_clusters: int = 0,
+    boundary_threshold: float = 0.5,
+) -> int:
+    """Write boundary_documents.csv with a summary header showing the data-driven threshold."""
+    age_cols = _best_age_cols(fuzzy_df)
+    cols = (
+        ["body_norm"]
+        + age_cols
+        + [
+            "primary_cluster", "primary_membership",
+            "second_cluster", "second_membership",
+            "third_cluster", "third_membership",
+        ]
+    )
     boundary = (
         fuzzy_df[fuzzy_df["is_boundary_doc"]]
         .sort_values("primary_membership", ascending=True)[cols]
@@ -185,9 +220,15 @@ def write_boundary_documents(fuzzy_df: pd.DataFrame, fuzzy_dir: Path) -> int:
     n_total = len(fuzzy_df)
     pct = 100.0 * n_boundary / n_total if n_total else 0.0
 
+    uniform_baseline = (1.0 / n_clusters) if n_clusters > 0 else float("nan")
     out_path = fuzzy_dir / "boundary_documents.csv"
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(f"# {n_boundary} boundary documents out of {n_total} total ({pct:.1f}%)\n")
+        fh.write(
+            f"# Boundary threshold: {boundary_threshold:.4f} "
+            f"({FUZZY_BOUNDARY_MULTIPLIER}x uniform baseline of {uniform_baseline:.4f}, "
+            f"n_clusters={n_clusters})\n"
+        )
         boundary.to_csv(fh, index=False)
 
     return n_boundary
@@ -237,11 +278,15 @@ def write_cluster_overlap_matrix(fuzzy_df: pd.DataFrame, fuzzy_dir: Path) -> Non
 
 def write_multi_topic_examples(fuzzy_df: pd.DataFrame, fuzzy_dir: Path, top_n: int = 50) -> None:
     """Write the clearest multi-topic documents (both top-2 memberships > 0.3)."""
-    cols = [
-        "body_norm",
-        "primary_cluster", "primary_membership",
-        "second_cluster", "second_membership",
-    ]
+    age_cols = _best_age_cols(fuzzy_df)
+    cols = (
+        ["body_norm"]
+        + age_cols
+        + [
+            "primary_cluster", "primary_membership",
+            "second_cluster", "second_membership",
+        ]
+    )
     multi = (
         fuzzy_df[
             (fuzzy_df["primary_membership"] > 0.3)
@@ -255,12 +300,16 @@ def write_multi_topic_examples(fuzzy_df: pd.DataFrame, fuzzy_dir: Path, top_n: i
     print(f"[fuzzy] {len(multi)} multi-topic examples written (top-2 memberships both > 0.3)")
 
 
-def enrich_overview_with_fuzzy(overview: pd.DataFrame, fuzzy_df: pd.DataFrame) -> pd.DataFrame:
+def enrich_overview_with_fuzzy(
+    overview: pd.DataFrame,
+    fuzzy_df: pd.DataFrame,
+    boundary_threshold: float = 0.5,
+) -> pd.DataFrame:
     """Add fuzzy summary columns to the cluster overview DataFrame."""
     rows = []
     for cid, grp in fuzzy_df.groupby("cluster_id"):
         mean_pm = float(grp["primary_membership"].mean())
-        boundary_count = int((grp["primary_membership"] < 0.5).sum())
+        boundary_count = int((grp["primary_membership"] < boundary_threshold).sum())
         sec_mode = grp["second_cluster"].mode()
         most_common_sec = int(sec_mode.iloc[0]) if len(sec_mode) > 0 else -1
         rows.append({
@@ -441,21 +490,37 @@ def _run_review(assign_path: Path, review_dir: Path, args) -> dict:
 
     n_boundary = 0
     fuzzy_dir_path = None
+    n_clusters = 0
+    boundary_threshold = 0.5
 
     if is_fuzzy:
-        fuzzy_df = build_fuzzy_doc_frame(df)
+        # Data-driven boundary threshold: FUZZY_BOUNDARY_MULTIPLIER × uniform baseline (1/n_clusters)
+        n_clusters = int(df[df["cluster_id"] >= 0]["cluster_id"].nunique())
+        boundary_threshold = (
+            FUZZY_BOUNDARY_MULTIPLIER / n_clusters if n_clusters > 0 else 0.5
+        )
+        print(
+            f"[fuzzy] boundary_threshold={boundary_threshold:.4f} "
+            f"({FUZZY_BOUNDARY_MULTIPLIER}x uniform baseline "
+            f"of {1/n_clusters:.4f}, n_clusters={n_clusters})"
+        )
+
+        fuzzy_df = build_fuzzy_doc_frame(df, boundary_threshold=boundary_threshold)
 
         kw_df = load_cluster_keywords(assign_path)
         if kw_df is not None:
             fuzzy_df = add_matched_topic_terms(fuzzy_df, kw_df)
 
-        overview = enrich_overview_with_fuzzy(overview, fuzzy_df)
+        overview = enrich_overview_with_fuzzy(overview, fuzzy_df, boundary_threshold=boundary_threshold)
 
         fuzzy_dir_path = review_dir / "fuzzy"
         fuzzy_dir_path.mkdir(parents=True, exist_ok=True)
 
         write_fuzzy_cluster_samples(fuzzy_df, review_dir, sample_size=100)
-        n_boundary = write_boundary_documents(fuzzy_df, fuzzy_dir_path)
+        n_boundary = write_boundary_documents(
+            fuzzy_df, fuzzy_dir_path,
+            n_clusters=n_clusters, boundary_threshold=boundary_threshold,
+        )
         write_cluster_overlap_matrix(fuzzy_df, fuzzy_dir_path)
         write_multi_topic_examples(fuzzy_df, fuzzy_dir_path)
 
@@ -479,6 +544,9 @@ def _run_review(assign_path: Path, review_dir: Path, args) -> dict:
         "fuzzy_mode": is_fuzzy,
         "n_boundary_docs": n_boundary if is_fuzzy else None,
         "boundary_pct": round(100.0 * n_boundary / len(df), 2) if is_fuzzy and len(df) else None,
+        "boundary_threshold": round(boundary_threshold, 6) if is_fuzzy else None,
+        "n_clusters_detected": n_clusters if is_fuzzy else None,
+        "boundary_multiplier": FUZZY_BOUNDARY_MULTIPLIER if is_fuzzy else None,
         "fuzzy_output_dir": str(fuzzy_dir_path) if fuzzy_dir_path else None,
     }
     with open(review_dir / "review_manifest.json", "w", encoding="utf-8") as f:

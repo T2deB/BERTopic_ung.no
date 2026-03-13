@@ -1,0 +1,220 @@
+{
+  "_version": "1.1 — filled keywords for girls 13-15 topics",
+  "topics": [
+    {
+      "label": "kvinners_mens_og_utflod",
+      "keywords": ["hatt mensen", "fikk mensen", "fått mensen", "mye utflod", "brun utflod", "uregelmessig mensen", "fått utflod"]
+    },
+    {
+      "label": "prevensjon_p_piller",
+      "keywords": ["pillefri uke", "pillefrie uken", "nytt brett", "neste brett", "hvite pillene", "fortsatt beskyttet", "p piller"]
+    },
+    {
+      "label": "graviditetsfrykt_etter_ubeskyttet_sex",
+      "keywords": ["ubeskyttet sex", "ubeskyttet samleie", "tok angrepille", "graviditets test", "dager forsinket", "gravid igjen", "beholde barnet"]
+    },
+    {
+      "label": "sti_og_underlivsinfeksjon",
+      "keywords": ["påvist klamydia", "fått klamydia", "hatt klamydia", "klamydia kur", "fått herpes", "bakteriell vaginose", "får utbrudd"]
+    },
+    {
+      "label": "sex_forste_gang_og_smerter",
+      "keywords": ["første gang", "gjør vondt", "får orgasme", "våt nok", "kåt nok", "stimulere klitoris", "bruke fingrene"]
+    },
+    {
+      "label": "rus_hasj_og_alkohol",
+      "keywords": ["røyket hasj", "røyka hasj", "røyker hasj", "drikke alkohol", "kjøpe alkohol", "urin prøve", "tatt kokain"]
+    },
+    {
+      "label": "snus_og_nikotin",
+      "keywords": ["prøvde snus", "prøvd snus", "nikotinfri snus", "tannlegen ser", "prikk snus", "slutte å snuse"]
+    },
+    {
+      "label": "psykisk_helse_angst_og_tvang",
+      "keywords": ["sosial angst", "tvangs tanker", "dårlige tanker", "psykisk lidelse", "psykiske problemer", "sosiale settinger", "sosiale situasjoner"]
+    },
+    {
+      "label": "selvskading_og_selvmordstanker",
+      "keywords": ["selvmords tanker", "drepe meg selv", "gjør selvskading", "trenger hjelp", "trist hele", "leve lenger", "leve mer"]
+    },
+    {
+      "label": "vgs_opptak_og_studiekompetanse",
+      "keywords": ["generell studiekompetanse", "samordna opptak", "ordinær kvote", "søke vgs", "søke videregående", "høyere utdanning", "videregående skole"]
+    },
+    {
+      "label": "eksamen_og_privatist",
+      "keywords": ["privatist eksamen", "muntlig eksamen", "skriftlig eksamen", "første året", "siste året", "høyt snitt", "engelsk fordypning"]
+    },
+    {
+      "label": "skolehverdag_anmerkning_og_larer",
+      "keywords": ["fikk anmerkning", "får anmerkning", "sette anmerkning", "lærer lov", "læreren tvinge", "foran klassen", "bytte klasse"]
+    },
+    {
+      "label": "forerkort_og_vegvesen",
+      "keywords": ["trafikalt grunnkurs", "førerkort klasse", "bil lappen", "mistet lappen", "mistet førerkortet", "statens vegvesen", "lett motorsykkel"]
+    },
+    {
+      "label": "jobb_lonn_og_stilling",
+      "keywords": ["søke jobb", "høyere lønn", "fast stilling", "fast ansatt", "får betalt", "får lønn", "jobber timer"]
+    },
+    {
+      "label": "hverdagsjus_politi_og_forelegg",
+      "keywords": ["forenklet forelegg", "politiet lov", "norsk lov", "norsk statsborgerskap", "norsk pass", "pengene tilbake", "privat eiendom"]
+    },
+    {
+      "label": "familie_konflikt_foreldre",
+      "keywords": ["skilte foreldre", "mamma krangler", "pappa krangler", "foreldre kontroll", "pappa bor", "kommer hjem", "får lov"]
+    },
+    {
+      "label": "forelskelse_folelser_for_en_person",
+      "keywords": ["skikkelig forelsket", "sykt forelsket", "jente liker", "liker ham", "fått følelser", "kontakt igjen", "møtes igjen"]
+    },
+    {
+      "label": "forhold_brudd_og_ambivalens",
+      "keywords": ["mistet følelser", "hele forholdet", "forholdet vårt", "forholdet våres", "tidligere forhold", "sammen igjen", "fint sammen"]
+    },
+    {
+      "label": "spiseforstyrrelse_og_kroppsvekt",
+      "keywords": ["spise mindre", "spise mer", "aldri sulten", "rundt kalorier", "dårlig samvittighet", "spiser mye", "sliter vekt"]
+    },
+    {
+      "label": "forelskelse_crush_tilnaerming",
+      "keywords": [
+        "liker en gutt", "liker ei jente", "crush", "forelska", "tør ikke si det",
+        "hvordan nærme seg", "vet ikke om han liker meg", "aldersforskjell kjæreste",
+        "vil bli kjæreste", "bare venner men vil mer"
+      ]
+    },
+    {
+      "label": "menstruasjon_periode_smerter",
+      "keywords": [
+        "første mensen", "uregelmessig mensen", "ikke fått mensen", "menssmerter",
+        "kraftig blødning", "tamponger", "brun utflod", "for sen periode",
+        "menstruasjonssyklus", "hvit utflod"
+      ]
+    },
+    {
+      "label": "prevensjon_graviditetsangst_ung",
+      "keywords": [
+        "kan jeg bli gravid", "kondom sprakk", "ubeskyttet sex", "angrepille",
+        "p-piller alder", "graviditetstest ung", "fingret blitt gravid",
+        "sæd utenfor", "plan b ung", "sannsynlighet graviditet"
+      ]
+    },
+    {
+      "label": "kropp_vekt_utseende_puberteten",
+      "keywords": [
+        "overvektig", "undervektig", "vil gå ned i vekt", "for tykk", "kviser",
+        "hudormer", "høyde vekst", "pubertet kropp", "glow up", "er jeg normal størrelse"
+      ]
+    },
+    {
+      "label": "psykisk_helse_krise_selvskading",
+      "keywords": [
+        "selvmordstanker", "vil ikke leve", "kutte meg", "selvskading",
+        "ta livet mitt", "ingen framtid", "vil forsvinne", "relapse selvskading",
+        "suicidalitet ung", "panikkanfall angst"
+      ]
+    },
+    {
+      "label": "spiseforstyrrelse_kroppsangst",
+      "keywords": [
+        "anoreksi", "bulimi", "spise opp og kaste opp", "redd for å gå opp i vekt",
+        "teller kalorier", "ABUP vekt", "spiser ikke nok", "tvunget til å spise",
+        "vektangst", "nekter å se seg i speilet"
+      ]
+    },
+    {
+      "label": "familie_hjemmeforhold_konflikt",
+      "keywords": [
+        "mamma slår", "pappa er streng", "skilte foreldre", "steforelder",
+        "foreldrene krangler", "vil flytte fra hjemmet", "ikke trygg hjemme",
+        "kjeft uten grunn", "foreldre bestemmer for mye", "redd hjemme"
+      ]
+    },
+    {
+      "label": "vennskap_sosiale_problemer",
+      "keywords": [
+        "ingen venner", "ekskludert fra gjengen", "baksnakkes", "venninne svarer ikke",
+        "skyldfølelse venner", "avvise venner pent", "venninnekrangel",
+        "mobbing", "ensom på skolen", "vil ha nye venner"
+      ]
+    },
+    {
+      "label": "seksuelt_overgrep_grenser_ung",
+      "keywords": [
+        "overgrep", "han tok på meg", "sa nei men han stoppet ikke",
+        "ble misbrukt", "pappa misbrukte", "holdt meg fast", "seksuell vold",
+        "uønsket berøring", "anmelde overgrep", "er dette overgrep"
+      ]
+    },
+    {
+      "label": "skole_karakter_skolevegring",
+      "keywords": [
+        "skulke", "anmerkning", "vil ikke på skolen", "presentasjonsangst",
+        "dårlige karakterer", "motivasjon skole", "ADHD skole",
+        "glemt lekser", "eksamen stress", "siste liten oppgave"
+      ]
+    },
+    {
+      "label": "seksuell_identitet_ung",
+      "keywords": [
+        "er jeg bifil", "er jeg lesbisk", "liker jenter og gutter", "skeiv",
+        "usikker på legning", "er det galt å være homo", "coming out til foreldre",
+        "er jeg trans", "kjønnsidentitet ung", "liker ikke gutter på den måten"
+      ]
+    },
+    {
+      "label": "kropp_pubertet_anatomi_spoersmaal",
+      "keywords": [
+        "er dette normalt nedentil", "utflod farge", "klitoris", "jomfruhinne",
+        "sopp kløe", "vagina spørsmål", "bryster vokser", "kjønnshår",
+        "pubertet symptomer", "anatomispørsmål jente"
+      ]
+    },
+    {
+      "label": "rus_eksperimentering_ung",
+      "keywords": [
+        "hasj prøvd", "weed første gang", "blandet hasj og alkohol",
+        "badtrip ung", "redd etter rus", "flashback rus",
+        "røyke med venner", "drukket for mye", "fest og alkohol 14 år", "narkotikatest foreldre"
+      ]
+    },
+    {
+      "label": "psykisk_helse_diagnose_hjelp",
+      "keywords": [
+        "har jeg angst", "har jeg ADHD", "har jeg autisme", "BUP henvisning",
+        "er jeg deprimert", "humørsvingninger", "hjelp psykisk helse",
+        "PPT skole", "terapeut ung", "borderline symptomer"
+      ]
+    },
+    {
+      "label": "sosiale_medier_nettliv",
+      "keywords": [
+        "snapchat", "tiktok", "instagram", "bli kjent online", "nettmobbing",
+        "kommentarer på nettet", "han følger meg på insta", "legge til på snap",
+        "sosiale medier press", "ukjent person på nett"
+      ]
+    },
+    {
+      "label": "barnevern_hjelpeapparat_tillit",
+      "keywords": [
+        "barnevernet", "helsesøster", "helsesykepleier taushetsplikt",
+        "anmelde helsepersonell", "vil ikke snakke med voksne", "redd for at voksne sier ifra",
+        "PPT skolen", "hvem kan jeg stole på", "bekymringsmelding", "støttekontakt"
+      ]
+    },
+    {
+      "label": "venner_konflikter_mobbing",
+      "keywords": []
+    },
+    {
+      "label": "skolepress_karakterangst",
+      "keywords": []
+    },
+    {
+      "label": "kjønnsidentitet_seksualitet_usikkerhet",
+      "keywords": []
+    }
+  ]
+}
