@@ -42,6 +42,7 @@ except ImportError:
 # ---------------------------
 SCRIPT_DIR = Path(__file__).parent   # folder containing the .py files (tracked by git)
 
+DATA_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\data"
 OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\outputs"
 SHARD_PREFIX = "bodynorm"
 A_EMB_FILE = "A_embeddings.npz"
@@ -62,7 +63,13 @@ USE_BERTOPIC_GUIDED = True
 
 # Fuzzy BERTopic (Nikbakht & Zojaji, 2026)
 USE_FUZZY_BERTOPIC = True   # set True to activate fuzzy c-means mode
-FUZZY_N_CLUSTERS = 50        # cluster count when not using guided seed
+FUZZY_N_CLUSTERS = 50        # fallback cluster count for unknown segment names
+FUZZY_N_CLUSTERS_BY_SEGMENT = {
+    "boys_13_15":  80,
+    "boys_16_20":  60,
+    "girls_13_15": 80,
+    "girls_16_20": 80,
+}
 FUZZY_M = 2.0                # fuzziness exponent (m=2 is standard)
 FUZZY_BATCH_SIZE = 5000      # doc-batch size for TI accumulation and membership prediction
 
@@ -163,15 +170,76 @@ def load_aligned_index(outdir: Path) -> pd.DataFrame:
     return pd.read_parquet(idx_path)
 
 
-def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame, str]:
-    """Join the exact numeric age column from AGE_LOOKUP_FILE into idx.
+def _norm_ts(series: pd.Series) -> pd.Series:
+    """Normalise a createdAt series to a canonical ISO-like string for joining.
 
-    Validates that the column is numeric and has ≥80% non-null values.
-    Returns (enriched_df, age_col_used) where age_col_used is "age" if a usable
-    numeric column was added/found, or "age_group_fallback" otherwise.
+    Tries pd.to_datetime first (handles formats like 'Jan 1, 2020 @ 02:26:42.000'
+    and ISO strings equally).  Falls back to stripped raw strings when parsing fails.
+    """
+    parsed = pd.to_datetime(series.astype(str), errors="coerce", utc=True)
+    if parsed.notna().mean() > 0.5:
+        return parsed.dt.strftime("%Y-%m-%dT%H:%M:%S")
+    return series.astype(str).str.strip()
+
+
+def build_age_lookup_from_raw(data_dir: Path) -> pd.DataFrame:
+    """Scan DATA_DIR for *.csv files and build a (createdAt_norm, age_raw) lookup.
+
+    Reads only createdAt and age from each file to minimise memory.
+    Returns a DataFrame with columns [createdAt_norm, age_raw] deduplicated on
+    createdAt_norm.  Returns an empty DataFrame if no usable files are found.
+    """
+    csv_files = sorted(data_dir.glob("*.csv"))
+    if not csv_files:
+        warnings.warn(f"[age_raw] No CSV files found in {data_dir}")
+        return pd.DataFrame(columns=["createdAt_norm", "age_raw"])
+
+    parts = []
+    for p in csv_files:
+        try:
+            chunk = pd.read_csv(
+                p, usecols=["createdAt", "age"],
+                dtype={"age": "Int64"},
+                encoding="utf-8-sig",
+                low_memory=True,
+            )
+            parts.append(chunk)
+        except Exception as exc:
+            warnings.warn(f"[age_raw] Could not read {p.name}: {exc}")
+
+    if not parts:
+        return pd.DataFrame(columns=["createdAt_norm", "age_raw"])
+
+    raw = pd.concat(parts, ignore_index=True)
+    raw["age_raw"] = pd.to_numeric(raw["age"], errors="coerce")
+    raw["createdAt_norm"] = _norm_ts(raw["createdAt"])
+
+    lookup = (
+        raw[["createdAt_norm", "age_raw"]]
+        .dropna(subset=["createdAt_norm"])
+        .drop_duplicates(subset=["createdAt_norm"])
+    )
+    print(
+        f"[age_raw] loaded {len(lookup)} unique timestamps with age "
+        f"from {len(parts)} CSV files in {data_dir}"
+    )
+    return lookup
+
+
+def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame, str, float]:
+    """Join numeric age into idx.  Tries three sources in order:
+
+    1. Raw CSV files in DATA_DIR  (joined on normalised createdAt)
+    2. C_index.parquet in outdir  (joined on body_norm + createdAt)
+    3. age_group string fallback  (existing approximate column)
+
+    Returns (enriched_df, age_col_used, coverage_pct) where:
+      age_col_used   = "age_numeric_joined" | "age_group_fallback"
+      coverage_pct   = fraction of rows that received a numeric age (0.0–1.0)
     """
     _FILL_THRESHOLD = 0.80
 
+    # If age is already present, validate and keep or drop
     if "age" in idx.columns:
         age_numeric = pd.to_numeric(idx["age"], errors="coerce")
         fill_rate = float(age_numeric.notna().mean())
@@ -179,53 +247,73 @@ def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame
             idx = idx.copy()
             idx["age"] = age_numeric
             print(f"[age] existing 'age' column retained — numeric fill rate {fill_rate:.1%}")
-            return idx, "age"
-        else:
-            print(
-                f"WARNING: existing 'age' column has only {fill_rate:.1%} numeric values "
-                f"(<{_FILL_THRESHOLD:.0%}); dropping and using age_group_fallback"
-            )
-            return idx.drop(columns=["age"]), "age_group_fallback"
+            return idx, "age_numeric_joined", fill_rate
+        print(
+            f"[age] existing 'age' column has only {fill_rate:.1%} numeric values "
+            f"(< {_FILL_THRESHOLD:.0%}); dropping and re-attempting join"
+        )
+        idx = idx.drop(columns=["age"])
 
+    # Attempt 1 — raw CSV files in DATA_DIR
+    data_dir = Path(DATA_DIR)
+    if data_dir.exists():
+        try:
+            lookup = build_age_lookup_from_raw(data_dir)
+            if not lookup.empty:
+                idx_norm = _norm_ts(idx["createdAt"].astype(str))
+                joined_age = (
+                    pd.DataFrame({"createdAt_norm": idx_norm})
+                    .merge(lookup, on="createdAt_norm", how="left")["age_raw"]
+                )
+                age_numeric = pd.to_numeric(joined_age, errors="coerce")
+                fill_rate = float(age_numeric.notna().mean())
+                if fill_rate >= _FILL_THRESHOLD:
+                    enriched = idx.copy()
+                    enriched["age"] = age_numeric.values
+                    n_matched = int(age_numeric.notna().sum())
+                    print(
+                        f"[age] raw CSV join: age matched for {n_matched}/{len(enriched)} rows "
+                        f"({fill_rate:.1%}) — using 'age_numeric_joined'"
+                    )
+                    return enriched, "age_numeric_joined", fill_rate
+                print(
+                    f"[age] raw CSV join coverage {fill_rate:.1%} < {_FILL_THRESHOLD:.0%} "
+                    f"— trying {AGE_LOOKUP_FILE} fallback"
+                )
+        except Exception as exc:
+            warnings.warn(f"[age] raw CSV join failed: {exc}")
+
+    # Attempt 2 — C_index.parquet
     lookup_path = outdir / AGE_LOOKUP_FILE
-    if not lookup_path.exists():
-        warnings.warn(f"[age] {AGE_LOOKUP_FILE} not found; using age_group approximation")
-        print(
-            "WARNING: No numeric age column found, using age_group string fallback "
-            "— segment boundaries may be approximate."
-        )
-        return idx, "age_group_fallback"
-
-    try:
-        lookup = pd.read_parquet(lookup_path, columns=["body_norm", "createdAt", "age"])
-        lookup = lookup.drop_duplicates(subset=["body_norm", "createdAt"])
-        enriched = idx.merge(lookup, on=["body_norm", "createdAt"], how="left")
-
-        age_numeric = pd.to_numeric(enriched["age"], errors="coerce")
-        fill_rate = float(age_numeric.notna().mean())
-        if fill_rate >= _FILL_THRESHOLD:
-            enriched["age"] = age_numeric
-            n_matched = int(age_numeric.notna().sum())
+    if lookup_path.exists():
+        try:
+            lkp2 = pd.read_parquet(lookup_path, columns=["body_norm", "createdAt", "age"])
+            lkp2 = lkp2.drop_duplicates(subset=["body_norm", "createdAt"])
+            enriched = idx.merge(lkp2, on=["body_norm", "createdAt"], how="left")
+            age_numeric = pd.to_numeric(enriched["age"], errors="coerce")
+            fill_rate = float(age_numeric.notna().mean())
+            if fill_rate >= _FILL_THRESHOLD:
+                enriched["age"] = age_numeric
+                n_matched = int(age_numeric.notna().sum())
+                print(
+                    f"[age] {AGE_LOOKUP_FILE} join: age matched for {n_matched}/{len(enriched)} rows "
+                    f"({fill_rate:.1%}) — using 'age_numeric_joined'"
+                )
+                return enriched, "age_numeric_joined", fill_rate
+            enriched = enriched.drop(columns=["age"], errors="ignore")
             print(
-                f"[age] exact age joined for {n_matched}/{len(enriched)} rows "
-                f"({fill_rate:.1%}) — using numeric 'age' column"
+                f"[age] {AGE_LOOKUP_FILE} coverage {fill_rate:.1%} < {_FILL_THRESHOLD:.0%} "
+                f"— falling back to age_group"
             )
-            return enriched, "age"
-        else:
-            enriched = enriched.drop(columns=["age"])
-            print(
-                f"WARNING: No numeric age column found (fill rate {fill_rate:.1%} "
-                f"< {_FILL_THRESHOLD:.0%}), using age_group string fallback "
-                "— segment boundaries may be approximate."
-            )
-            return enriched, "age_group_fallback"
-    except Exception as exc:
-        warnings.warn(f"[age] could not join exact age from {AGE_LOOKUP_FILE}: {exc}")
-        print(
-            "WARNING: No numeric age column found, using age_group string fallback "
-            "— segment boundaries may be approximate."
-        )
-        return idx, "age_group_fallback"
+        except Exception as exc:
+            warnings.warn(f"[age] {AGE_LOOKUP_FILE} join failed: {exc}")
+
+    # Final fallback — age_group strings
+    print(
+        "WARNING: numeric age join failed or insufficient coverage — "
+        "using age_group string fallback."
+    )
+    return idx, "age_group_fallback", 0.0
 
 
 def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
@@ -827,6 +915,7 @@ def run_one_segment(
     idx_seg: pd.DataFrame,
     embs_seg: np.ndarray,
     age_column_used: str = "age_group_fallback",
+    age_coverage_pct: float = 0.0,
 ) -> None:
     # Load per-segment guided topics from SCRIPT_DIR (git-tracked)
     filename = GUIDED_TOPICS_FILES.get(seg_name, GUIDED_TOPICS_FILES["_default"])
@@ -876,8 +965,14 @@ def run_one_segment(
     sampling_method = "sample_fit"
     sampling_n_used = len(sample_idx)
     transform_n_used = 0
+    n_fuzzy_clusters = FUZZY_N_CLUSTERS_BY_SEGMENT.get(seg_name, FUZZY_N_CLUSTERS)  # updated inside fuzzy block
 
     if USE_FUZZY_BERTOPIC:
+        # Per-segment cluster count; falls back to global FUZZY_N_CLUSTERS for unknown names
+        seg_n_clusters = FUZZY_N_CLUSTERS_BY_SEGMENT.get(seg_name, FUZZY_N_CLUSTERS)
+        print(f"[segment:{seg_name}] fuzzy n_clusters={seg_n_clusters} "
+              f"(from {'FUZZY_N_CLUSTERS_BY_SEGMENT' if seg_name in FUZZY_N_CLUSTERS_BY_SEGMENT else 'FUZZY_N_CLUSTERS fallback'})")
+
         if USE_BERTOPIC_GUIDED and seed_topic_list:
             # Discover cluster structure with guided BERTopic, then use that count for fuzzy c-means
             guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
@@ -885,12 +980,12 @@ def run_one_segment(
             if n_fuzzy_clusters < 2:
                 warnings.warn(
                     f"Guided BERTopic found <2 clusters for {seg_name}; "
-                    f"using FUZZY_N_CLUSTERS={FUZZY_N_CLUSTERS}"
+                    f"using per-segment default n_clusters={seg_n_clusters}"
                 )
-                n_fuzzy_clusters = FUZZY_N_CLUSTERS
+                n_fuzzy_clusters = seg_n_clusters
             mode = "fuzzy_bertopic_guided"
         else:
-            n_fuzzy_clusters = FUZZY_N_CLUSTERS
+            n_fuzzy_clusters = seg_n_clusters
             mode = "fuzzy_bertopic"
 
         # Attempt A — full-corpus fit (only when segment exceeds sample cap)
@@ -1062,6 +1157,7 @@ def run_one_segment(
         "n_assigned": int((labels_all >= 0).sum()),
         "n_noise": int((labels_all < 0).sum()),
         "age_column_used": age_column_used,
+        "age_coverage_pct": round(age_coverage_pct * 100, 1),
         "files": {
             "guided_topics_file": str(topics_path),
             "clusters_keywords": str(outdir / "clusters_keywords.csv"),
@@ -1076,7 +1172,7 @@ def run_one_segment(
         "age_split_note": "Exact 13-15/16-20 requires numeric age column. age_group fallback is approximate.",
         "fuzzy": {
             "enabled": USE_FUZZY_BERTOPIC,
-            "n_clusters": FUZZY_N_CLUSTERS if USE_FUZZY_BERTOPIC else None,
+            "n_clusters": n_fuzzy_clusters if USE_FUZZY_BERTOPIC else None,
             "m": FUZZY_M if USE_FUZZY_BERTOPIC else None,
             "membership_stored": full_membership is not None,
         },
@@ -1093,7 +1189,7 @@ def main() -> None:
     embs = load_all_embeddings(outdir, SHARD_PREFIX)
     idx = load_aligned_index(outdir)
     idx = reconcile_index_length(outdir, idx, len(embs))
-    idx, age_col_used = enrich_with_exact_age(idx, outdir)
+    idx, age_col_used, age_coverage = enrich_with_exact_age(idx, outdir)
     if "body_norm" not in idx.columns:
         raise ValueError("Index is missing body_norm column")
 
@@ -1106,9 +1202,11 @@ def main() -> None:
             embs_seg = embs[mask]
             seg_out = base / seg["name"]
             seg_out.mkdir(parents=True, exist_ok=True)
-            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg, age_column_used=age_col_used)
+            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg,
+                            age_column_used=age_col_used, age_coverage_pct=age_coverage)
     else:
-        run_one_segment("all", outdir, idx.reset_index(drop=True), embs, age_column_used=age_col_used)
+        run_one_segment("all", outdir, idx.reset_index(drop=True), embs,
+                        age_column_used=age_col_used, age_coverage_pct=age_coverage)
 
     print("[done] clustering pipeline completed")
 
