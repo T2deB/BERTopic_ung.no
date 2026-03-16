@@ -98,7 +98,7 @@ HDBSCAN_CORE_DIST_N_JOBS = 1
 
 # Assignment thresholds
 ASSIGN_MIN_SIM = 0.44
-ASSIGN_MIN_MARGIN = 0.035
+ASSIGN_MIN_MARGIN = 0.020
 
 # c-TF-IDF
 NGRAM_RANGE = (1, 2)
@@ -163,31 +163,69 @@ def load_aligned_index(outdir: Path) -> pd.DataFrame:
     return pd.read_parquet(idx_path)
 
 
-def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> pd.DataFrame:
+def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame, str]:
     """Join the exact numeric age column from AGE_LOOKUP_FILE into idx.
 
-    Matches rows on (body_norm, createdAt).  Rows without a match keep NaN,
-    and build_segment_mask() already falls back to age_group for those.
-    No-ops if the age column is already present or the lookup file is missing.
+    Validates that the column is numeric and has ≥80% non-null values.
+    Returns (enriched_df, age_col_used) where age_col_used is "age" if a usable
+    numeric column was added/found, or "age_group_fallback" otherwise.
     """
+    _FILL_THRESHOLD = 0.80
+
     if "age" in idx.columns:
-        return idx
+        age_numeric = pd.to_numeric(idx["age"], errors="coerce")
+        fill_rate = float(age_numeric.notna().mean())
+        if fill_rate >= _FILL_THRESHOLD:
+            idx = idx.copy()
+            idx["age"] = age_numeric
+            print(f"[age] existing 'age' column retained — numeric fill rate {fill_rate:.1%}")
+            return idx, "age"
+        else:
+            print(
+                f"WARNING: existing 'age' column has only {fill_rate:.1%} numeric values "
+                f"(<{_FILL_THRESHOLD:.0%}); dropping and using age_group_fallback"
+            )
+            return idx.drop(columns=["age"]), "age_group_fallback"
 
     lookup_path = outdir / AGE_LOOKUP_FILE
     if not lookup_path.exists():
         warnings.warn(f"[age] {AGE_LOOKUP_FILE} not found; using age_group approximation")
-        return idx
+        print(
+            "WARNING: No numeric age column found, using age_group string fallback "
+            "— segment boundaries may be approximate."
+        )
+        return idx, "age_group_fallback"
 
     try:
         lookup = pd.read_parquet(lookup_path, columns=["body_norm", "createdAt", "age"])
         lookup = lookup.drop_duplicates(subset=["body_norm", "createdAt"])
         enriched = idx.merge(lookup, on=["body_norm", "createdAt"], how="left")
-        n_matched = enriched["age"].notna().sum()
-        print(f"[age] exact age joined for {n_matched}/{len(enriched)} rows ({100*n_matched/len(enriched):.1f}%)")
-        return enriched
+
+        age_numeric = pd.to_numeric(enriched["age"], errors="coerce")
+        fill_rate = float(age_numeric.notna().mean())
+        if fill_rate >= _FILL_THRESHOLD:
+            enriched["age"] = age_numeric
+            n_matched = int(age_numeric.notna().sum())
+            print(
+                f"[age] exact age joined for {n_matched}/{len(enriched)} rows "
+                f"({fill_rate:.1%}) — using numeric 'age' column"
+            )
+            return enriched, "age"
+        else:
+            enriched = enriched.drop(columns=["age"])
+            print(
+                f"WARNING: No numeric age column found (fill rate {fill_rate:.1%} "
+                f"< {_FILL_THRESHOLD:.0%}), using age_group string fallback "
+                "— segment boundaries may be approximate."
+            )
+            return enriched, "age_group_fallback"
     except Exception as exc:
         warnings.warn(f"[age] could not join exact age from {AGE_LOOKUP_FILE}: {exc}")
-        return idx
+        print(
+            "WARNING: No numeric age column found, using age_group string fallback "
+            "— segment boundaries may be approximate."
+        )
+        return idx, "age_group_fallback"
 
 
 def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
@@ -770,6 +808,11 @@ def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: in
         return (gmask & amask.fillna(False)).to_numpy()
 
     # fallback with age_group approximation
+    if age_min == 16:
+        warnings.warn(
+            "WARNING: age_group string boundaries may misplace 16-year-olds — "
+            "verify segment membership if results look off."
+        )
     ag = idx.get("age_group", pd.Series(["ukjent"] * len(idx))).astype(str)
     if age_min == 13 and age_max == 15:
         amask = ag.eq("13-16")  # includes 16 when exact age is unavailable
@@ -778,7 +821,13 @@ def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: in
     return (gmask & amask).to_numpy()
 
 
-def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg: np.ndarray) -> None:
+def run_one_segment(
+    seg_name: str,
+    outdir: Path,
+    idx_seg: pd.DataFrame,
+    embs_seg: np.ndarray,
+    age_column_used: str = "age_group_fallback",
+) -> None:
     # Load per-segment guided topics from SCRIPT_DIR (git-tracked)
     filename = GUIDED_TOPICS_FILES.get(seg_name, GUIDED_TOPICS_FILES["_default"])
     topics_path = SCRIPT_DIR / filename
@@ -789,12 +838,30 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
     seed_labels, seed_topic_list = load_guided_topics(topics_path)
     print(f"[{seg_name}] Loaded {len(seed_topic_list)} seed topics from {topics_path.name}")
 
-    print(f"\n[segment] {seg_name} | N={len(idx_seg)}")
-    if len(idx_seg) < max(HDBSCAN_MIN_CLUSTER_SIZE * 3, 1000):
+    n_total = len(idx_seg)
+    print(f"\n[segment] {seg_name} | N={n_total}")
+
+    # Print actual age range found in this segment (Change 3)
+    if "age" in idx_seg.columns:
+        age_num = pd.to_numeric(idx_seg["age"], errors="coerce")
+        valid_ages = age_num.dropna()
+        if len(valid_ages):
+            print(
+                f"Segment {seg_name}: age range in data = "
+                f"{int(valid_ages.min())}–{int(valid_ages.max())}, n={n_total}"
+            )
+        else:
+            age_vals = sorted(idx_seg["age_group"].dropna().unique().tolist()) if "age_group" in idx_seg.columns else []
+            print(f"Segment {seg_name}: age_group values in data = {age_vals}, n={n_total}")
+    elif "age_group" in idx_seg.columns:
+        age_vals = sorted(idx_seg["age_group"].dropna().unique().tolist())
+        print(f"Segment {seg_name}: age_group values in data = {age_vals}, n={n_total}")
+
+    if n_total < max(HDBSCAN_MIN_CLUSTER_SIZE * 3, 1000):
         warnings.warn(f"Segment {seg_name} too small; skipping")
         return
 
-    sample_target = min(SAMPLE_SIZE, len(idx_seg))
+    sample_target = min(SAMPLE_SIZE, n_total)
     sample_idx = stratified_sample_index(idx_seg, sample_target, MIN_PER_STRATUM, SAMPLE_RANDOM_STATE)
     if len(sample_idx) == 0:
         warnings.warn(f"Segment {seg_name} returned empty sample; skipping")
@@ -803,7 +870,12 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
     sample_embs = embs_seg[sample_idx]
     sample_texts = idx_seg.iloc[sample_idx]["body_norm"].astype(str).tolist()
 
-    full_membership = None  # (n_docs, n_clusters) – populated only in fuzzy mode
+    full_membership = None   # (n_docs, n_clusters) – populated only in fuzzy mode
+    centroid_embs = sample_embs   # overridden to embs_seg on successful full-corpus fit
+    centroid_labels: np.ndarray   # assigned in all paths below
+    sampling_method = "sample_fit"
+    sampling_n_used = len(sample_idx)
+    transform_n_used = 0
 
     if USE_FUZZY_BERTOPIC:
         if USE_BERTOPIC_GUIDED and seed_topic_list:
@@ -821,25 +893,61 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
             n_fuzzy_clusters = FUZZY_N_CLUSTERS
             mode = "fuzzy_bertopic"
 
-        sample_labels, _sample_membership, umap_model, cntr = cluster_with_fuzzy_cmeans(
-            sample_embs, n_fuzzy_clusters, FUZZY_M
-        )
+        # Attempt A — full-corpus fit (only when segment exceeds sample cap)
+        full_fit_succeeded = False
+        if n_total > SAMPLE_SIZE:
+            print(f"Segment {seg_name}: attempting full-corpus fit (n={n_total})...")
+            try:
+                hard_labels_all, full_membership_fit, umap_model, cntr = cluster_with_fuzzy_cmeans(
+                    embs_seg, n_fuzzy_clusters, FUZZY_M
+                )
+                full_membership = full_membership_fit
+                centroid_embs = embs_seg
+                centroid_labels = hard_labels_all
+                sampling_method = "full_fit"
+                sampling_n_used = n_total
+                full_fit_succeeded = True
+                print(f"Segment {seg_name}: full-corpus fit succeeded (n={n_total}).")
+            except Exception as _oom:
+                if not (isinstance(_oom, MemoryError) or "MemoryError" in type(_oom).__name__):
+                    raise
+                print(
+                    f"Segment {seg_name}: full-corpus fit failed with MemoryError. "
+                    f"Falling back to fit-on-sample + umap.transform for remainder."
+                )
 
-        if umap_model is not None and cntr is not None:
-            print(f"[segment:{seg_name}] predicting fuzzy membership for all {len(embs_seg)} docs...")
-            full_membership = _predict_fuzzy_membership_batched(embs_seg, umap_model, cntr, FUZZY_M)
+        # Fallback B — fit on sample, transform remainder (also the normal path when n_total <= SAMPLE_SIZE)
+        if not full_fit_succeeded:
+            sample_labels, _sample_membership, umap_model, cntr = cluster_with_fuzzy_cmeans(
+                sample_embs, n_fuzzy_clusters, FUZZY_M
+            )
+            centroid_labels = sample_labels
+            centroid_embs = sample_embs
+
+            if umap_model is not None and cntr is not None:
+                print(f"[segment:{seg_name}] predicting fuzzy membership for all {n_total} docs...")
+                full_membership = _predict_fuzzy_membership_batched(embs_seg, umap_model, cntr, FUZZY_M)
+
+            if n_total > SAMPLE_SIZE:
+                transform_n_used = n_total - len(sample_idx)
+                sampling_method = "fit_sample_transform_remainder"
+                sampling_n_used = len(sample_idx)
+                print(
+                    f"Segment {seg_name}: fit on {len(sample_idx)} sample, "
+                    f"transformed {transform_n_used} additional docs via umap.transform."
+                )
 
     elif USE_BERTOPIC_GUIDED and seed_topic_list:
-        sample_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
+        centroid_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
         mode = "bertopic_guided"
     else:
-        sample_labels = cluster_with_hdbscan(sample_embs)
+        centroid_labels = cluster_with_hdbscan(sample_embs)
         mode = "umap_hdbscan"
 
-    n_clusters = int(len(set(sample_labels[sample_labels >= 0])))
-    print(f"[segment:{seg_name}] mode={mode} clusters={n_clusters} noise={(sample_labels == -1).sum()}")
+    n_clusters = int(len(set(centroid_labels[centroid_labels >= 0])))
+    print(f"[segment:{seg_name}] mode={mode} clusters={n_clusters} noise={(centroid_labels == -1).sum()}")
 
-    centroids = compute_centroids(sample_embs, sample_labels)
+    centroids = compute_centroids(centroid_embs, centroid_labels)
     labels_all, sim_all, margin_all = assign_all(embs_seg, centroids, ASSIGN_MIN_SIM, ASSIGN_MIN_MARGIN)
     print(f"[segment:{seg_name}] assigned={(labels_all >= 0).sum()} noise={(labels_all < 0).sum()}")
 
@@ -935,21 +1043,32 @@ def run_one_segment(seg_name: str, outdir: Path, idx_seg: pd.DataFrame, embs_seg
         })
     pd.DataFrame(rows).sort_values("size", ascending=False).to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
 
+    sampling_entry: dict = {
+        "size": SAMPLE_SIZE,
+        "min_per_stratum": MIN_PER_STRATUM,
+        "seed": SAMPLE_RANDOM_STATE,
+        "method": sampling_method,
+        "sampling_n": sampling_n_used,
+    }
+    if transform_n_used > 0:
+        sampling_entry["transform_n"] = transform_n_used
+
     params = {
         "segment": seg_name,
         "mode": mode,
-        "n_total": int(len(idx_seg)),
-        "n_sample": int(len(sample_idx)),
+        "n_total": n_total,
+        "n_sample": sampling_n_used,
         "n_clusters": n_clusters,
         "n_assigned": int((labels_all >= 0).sum()),
         "n_noise": int((labels_all < 0).sum()),
+        "age_column_used": age_column_used,
         "files": {
             "guided_topics_file": str(topics_path),
             "clusters_keywords": str(outdir / "clusters_keywords.csv"),
             "clusters_keywords_unigrams": str(outdir / "clusters_keywords_unigrams.csv"),
             "clusters_keywords_bigrams": str(outdir / "clusters_keywords_bigrams.csv"),
         },
-        "sampling": {"size": SAMPLE_SIZE, "min_per_stratum": MIN_PER_STRATUM, "seed": SAMPLE_RANDOM_STATE},
+        "sampling": sampling_entry,
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
         "guided_topics_file": str(topics_path),
         "guided_topics_loaded": len(seed_topic_list),
@@ -974,7 +1093,7 @@ def main() -> None:
     embs = load_all_embeddings(outdir, SHARD_PREFIX)
     idx = load_aligned_index(outdir)
     idx = reconcile_index_length(outdir, idx, len(embs))
-    idx = enrich_with_exact_age(idx, outdir)
+    idx, age_col_used = enrich_with_exact_age(idx, outdir)
     if "body_norm" not in idx.columns:
         raise ValueError("Index is missing body_norm column")
 
@@ -987,9 +1106,9 @@ def main() -> None:
             embs_seg = embs[mask]
             seg_out = base / seg["name"]
             seg_out.mkdir(parents=True, exist_ok=True)
-            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg)
+            run_one_segment(seg["name"], seg_out, idx_seg, embs_seg, age_column_used=age_col_used)
     else:
-        run_one_segment("all", outdir, idx.reset_index(drop=True), embs)
+        run_one_segment("all", outdir, idx.reset_index(drop=True), embs, age_column_used=age_col_used)
 
     print("[done] clustering pipeline completed")
 
