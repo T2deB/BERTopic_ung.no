@@ -182,23 +182,63 @@ def _norm_ts(series: pd.Series) -> pd.Series:
     return series.astype(str).str.strip()
 
 
-def build_age_lookup_from_raw(data_dir: Path) -> pd.DataFrame:
-    """Scan DATA_DIR for *.csv files and build a (createdAt_norm, age_raw) lookup.
+def _norm_body(series: pd.Series) -> pd.Series:
+    """Normalise question body text for joining.
 
-    Reads only createdAt and age from each file to minimise memory.
-    Returns a DataFrame with columns [createdAt_norm, age_raw] deduplicated on
-    createdAt_norm.  Returns an empty DataFrame if no usable files are found.
+    Applies: lowercase → strip → collapse multiple spaces → strip greeting prefix.
+    Both the raw CSV body column and the index body_norm column are normalised
+    identically so that the join key is consistent across sources.
     """
-    csv_files = sorted(data_dir.glob("*.csv"))
+    s = (
+        series.astype(str)
+        .str.lower()
+        .str.strip()
+        .str.replace(r"\s+", " ", regex=True)
+    )
+    # Strip leading greeting words (same pattern as strip_greeting())
+    s = s.str.replace(
+        r"^(hei|heisann|hallo|halloi)[\s,!:.\-]+", "", regex=True
+    ).str.strip()
+    return s
+
+
+def build_age_lookup_from_raw(data_dir: Path) -> pd.DataFrame:
+    """Scan DATA_DIR for *.csv files and build a (body_key, age_raw) lookup.
+
+    Reads only the question body text and age columns to minimise memory.
+    Auto-detects the text column name from the first file header.
+    Returns DataFrame with columns [body_key, age_raw] deduplicated on body_key.
+    Returns an empty DataFrame if no usable files are found.
+    """
+    csv_files = sorted(p for p in data_dir.glob("*.csv")
+                       if p.suffix.lower() == ".csv" and p.stat().st_size > 0)
     if not csv_files:
         warnings.warn(f"[age_raw] No CSV files found in {data_dir}")
-        return pd.DataFrame(columns=["createdAt_norm", "age_raw"])
+        return pd.DataFrame(columns=["body_key", "age_raw"])
+
+    # Auto-detect the question body column name from the first file
+    text_col = None
+    try:
+        header = pd.read_csv(csv_files[0], nrows=0, encoding="utf-8-sig", sep=None, engine="python")
+        for candidate in ["body", "question", "text", "body_norm", "sporsmal", "tekst"]:
+            if candidate in header.columns:
+                text_col = candidate
+                break
+        if text_col is None:
+            warnings.warn(
+                f"[age_raw] Could not identify text column in {csv_files[0].name}; "
+                f"columns found: {header.columns.tolist()}"
+            )
+            return pd.DataFrame(columns=["body_key", "age_raw"])
+    except Exception as exc:
+        warnings.warn(f"[age_raw] Could not read header of {csv_files[0].name}: {exc}")
+        return pd.DataFrame(columns=["body_key", "age_raw"])
 
     parts = []
     for p in csv_files:
         try:
             chunk = pd.read_csv(
-                p, usecols=["createdAt", "age"],
+                p, usecols=[text_col, "age"],
                 dtype={"age": "Int64"},
                 encoding="utf-8-sig",
                 low_memory=True,
@@ -208,21 +248,18 @@ def build_age_lookup_from_raw(data_dir: Path) -> pd.DataFrame:
             warnings.warn(f"[age_raw] Could not read {p.name}: {exc}")
 
     if not parts:
-        return pd.DataFrame(columns=["createdAt_norm", "age_raw"])
+        return pd.DataFrame(columns=["body_key", "age_raw"])
 
     raw = pd.concat(parts, ignore_index=True)
     raw["age_raw"] = pd.to_numeric(raw["age"], errors="coerce")
-    raw["createdAt_norm"] = _norm_ts(raw["createdAt"])
+    raw["body_key"] = _norm_body(raw[text_col])
 
     lookup = (
-        raw[["createdAt_norm", "age_raw"]]
-        .dropna(subset=["createdAt_norm"])
-        .drop_duplicates(subset=["createdAt_norm"])
+        raw[["body_key", "age_raw"]]
+        .dropna(subset=["body_key"])
+        .drop_duplicates(subset=["body_key"])
     )
-    print(
-        f"[age_raw] loaded {len(lookup)} unique timestamps with age "
-        f"from {len(parts)} CSV files in {data_dir}"
-    )
+    print(f"Age lookup built: {len(lookup):,} rows from {len(parts)} files.")
     return lookup
 
 
@@ -254,30 +291,31 @@ def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame
         )
         idx = idx.drop(columns=["age"])
 
-    # Attempt 1 — raw CSV files in DATA_DIR
+    # Attempt 1 — raw CSV files in DATA_DIR (joined on normalised body text)
     data_dir = Path(DATA_DIR)
     if data_dir.exists():
         try:
             lookup = build_age_lookup_from_raw(data_dir)
             if not lookup.empty:
-                idx_norm = _norm_ts(idx["createdAt"].astype(str))
+                idx_keys = _norm_body(idx["body_norm"])
                 joined_age = (
-                    pd.DataFrame({"createdAt_norm": idx_norm})
-                    .merge(lookup, on="createdAt_norm", how="left")["age_raw"]
+                    pd.DataFrame({"body_key": idx_keys.values})
+                    .merge(lookup, on="body_key", how="left")["age_raw"]
                 )
                 age_numeric = pd.to_numeric(joined_age, errors="coerce")
                 fill_rate = float(age_numeric.notna().mean())
+                n_matched = int(age_numeric.notna().sum())
+                print(f"Numeric age join coverage: {fill_rate:.1%}")
                 if fill_rate >= _FILL_THRESHOLD:
                     enriched = idx.copy()
                     enriched["age"] = age_numeric.values
-                    n_matched = int(age_numeric.notna().sum())
                     print(
-                        f"[age] raw CSV join: age matched for {n_matched}/{len(enriched)} rows "
+                        f"[age] raw CSV body-text join: age matched for {n_matched}/{len(enriched)} rows "
                         f"({fill_rate:.1%}) — using 'age_numeric_joined'"
                     )
                     return enriched, "age_numeric_joined", fill_rate
                 print(
-                    f"[age] raw CSV join coverage {fill_rate:.1%} < {_FILL_THRESHOLD:.0%} "
+                    f"[age] raw CSV body-text join coverage {fill_rate:.1%} < {_FILL_THRESHOLD:.0%} "
                     f"— trying {AGE_LOOKUP_FILE} fallback"
                 )
         except Exception as exc:
@@ -310,10 +348,12 @@ def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame
 
     # Final fallback — age_group strings
     print(
-        "WARNING: numeric age join failed or insufficient coverage — "
-        "using age_group string fallback."
+        "WARNING: Numeric age join coverage too low or failed — "
+        "using age_group string fallback. "
+        "NOTE: The age_group string value '13-16' covers both 13–15 AND 16-year-olds. "
+        "All 16-year-olds will be misclassified into the younger segments."
     )
-    return idx, "age_group_fallback", 0.0
+    return idx, "age_group_fallback_BOUNDARY_WARNING", 0.0
 
 
 def _empty_meta_frame(n_rows: int) -> pd.DataFrame:
