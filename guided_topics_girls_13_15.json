@@ -63,11 +63,11 @@
     },
     {
       "label": "familie_konflikt_foreldre",
-      "keywords": ["skilte foreldre", "mamma krangler", "pappa krangler", "foreldre kontroll", "pappa bor", "kommer hjem", "får lov"]
+      "keywords": ["krangel med mamma", "krangel med pappa", "foreldre skilles", "foreldre er skilt", "pappa drikker", "mamma drikker", "hjemme er vanskelig", "redd for å gå hjem", "hjemmeforhold", "foreldrene mine krangler", "ikke trygg hjemme", "foreldrene mine skilles", "steforeldre", "stefar", "stemor", "vil ikke bo hjemme", "flytte ut hjemmefra", "vanskelig hjemme"]
     },
     {
       "label": "forelskelse_folelser_for_en_person",
-      "keywords": ["skikkelig forelsket", "sykt forelsket", "jente liker", "liker ham", "fått følelser", "kontakt igjen", "møtes igjen"]
+      "keywords": ["forelsket", "klarer ikke slutte å tenke på", "tenker på han hele tiden", "tenker på henne hele tiden", "sommerfugler i magen", "savner han", "savner henne", "hjertesorg", "ulykkelig forelsket", "liker to personer", "forelsket i bestevennen", "forelsket i bestevenninna", "forelsket i en eldre", "aldersforskjell kjæreste"]
     },
     {
       "label": "forhold_brudd_og_ambivalens",
@@ -79,11 +79,7 @@
     },
     {
       "label": "forelskelse_crush_tilnaerming",
-      "keywords": [
-        "liker en gutt", "liker ei jente", "crush", "forelska", "tør ikke si det",
-        "hvordan nærme seg", "vet ikke om han liker meg", "aldersforskjell kjæreste",
-        "vil bli kjæreste", "bare venner men vil mer"
-      ]
+      "keywords": ["jeg liker en gutt", "jeg liker ei jente", "liker noen i klassen", "hvordan si at jeg liker", "tørr ikke si det", "han vet ikke at jeg liker ham", "hun vet ikke at jeg liker henne", "si det til han", "si det til henne", "flørter han med meg", "flørter hun med meg", "tegn på at han liker meg", "tegn på at hun liker meg", "nærme seg", "ta kontakt med"]
     },
     {
       "label": "menstruasjon_periode_smerter",
@@ -126,19 +122,11 @@
     },
     {
       "label": "familie_hjemmeforhold_konflikt",
-      "keywords": [
-        "mamma slår", "pappa er streng", "skilte foreldre", "steforelder",
-        "foreldrene krangler", "vil flytte fra hjemmet", "ikke trygg hjemme",
-        "kjeft uten grunn", "foreldre bestemmer for mye", "redd hjemme"
-      ]
+      "keywords": ["kontrollerende foreldre", "foreldre leser meldingene", "foreldre bestemmer alt", "ikke får lov", "strengt hjemme", "foreldre skjønner ikke", "foreldre godtar ikke", "foreldrene mine er religiøse", "kulturforskjell hjemme", "ikke får ha kjæreste", "ikke lov å gå ut", "må lyve for foreldrene", "hemmelig for foreldre"]
     },
     {
       "label": "vennskap_sosiale_problemer",
-      "keywords": [
-        "ingen venner", "ekskludert fra gjengen", "baksnakkes", "venninne svarer ikke",
-        "skyldfølelse venner", "avvise venner pent", "venninnekrangel",
-        "mobbing", "ensom på skolen", "vil ha nye venner"
-      ]
+      "keywords": ["ingen venner", "ensom på skolen", "utestengt fra gjengen", "venner baksnakker meg", "bestevennen sviktet", "venner har forlatt meg", "ny på skolen uten venner", "passer ikke inn", "ekskludert fra gruppen", "mobbing fra venner", "falske venner", "venninner er slemme", "ikke invitert", "alene i friminuttet"]
     },
     {
       "label": "seksuelt_overgrep_grenser_ung",
