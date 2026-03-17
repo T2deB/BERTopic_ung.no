@@ -62,12 +62,17 @@
       "keywords": ["forenklet forelegg", "politiet lov", "norsk lov", "norsk statsborgerskap", "norsk pass", "pengene tilbake", "privat eiendom"]
     },
     {
-      "label": "familie_konflikt_foreldre",
-      "keywords": ["krangel med mamma", "krangel med pappa", "foreldre skilles", "foreldre er skilt", "pappa drikker", "mamma drikker", "hjemme er vanskelig", "redd for å gå hjem", "hjemmeforhold", "foreldrene mine krangler", "ikke trygg hjemme", "foreldrene mine skilles", "steforeldre", "stefar", "stemor", "vil ikke bo hjemme", "flytte ut hjemmefra", "vanskelig hjemme"]
-    },
-    {
-      "label": "forelskelse_folelser_for_en_person",
-      "keywords": ["forelsket", "klarer ikke slutte å tenke på", "tenker på han hele tiden", "tenker på henne hele tiden", "sommerfugler i magen", "savner han", "savner henne", "hjertesorg", "ulykkelig forelsket", "liker to personer", "forelsket i bestevennen", "forelsket i bestevenninna", "forelsket i en eldre", "aldersforskjell kjæreste"]
+      "label": "familie_og_hjemmeforhold",
+      "keywords": [
+        "krangel med mamma", "krangel med pappa", "foreldre skilles", "foreldre er skilt",
+        "pappa drikker", "mamma drikker", "hjemme er vanskelig", "redd for å gå hjem",
+        "foreldrene mine krangler", "ikke trygg hjemme", "steforeldre", "stefar", "stemor",
+        "vil ikke bo hjemme", "flytte ut hjemmefra", "kontrollerende foreldre",
+        "foreldre leser meldingene", "foreldre bestemmer alt", "ikke får lov", "strengt hjemme",
+        "foreldre skjønner ikke", "foreldre godtar ikke", "ikke får ha kjæreste",
+        "ikke lov å gå ut", "må lyve for foreldrene", "hemmelig for foreldre",
+        "foreldrene mine er religiøse", "kulturforskjell hjemme"
+      ]
     },
     {
       "label": "forhold_brudd_og_ambivalens",
@@ -78,8 +83,18 @@
       "keywords": ["spise mindre", "spise mer", "aldri sulten", "rundt kalorier", "dårlig samvittighet", "spiser mye", "sliter vekt"]
     },
     {
-      "label": "forelskelse_crush_tilnaerming",
-      "keywords": ["jeg liker en gutt", "jeg liker ei jente", "liker noen i klassen", "hvordan si at jeg liker", "tørr ikke si det", "han vet ikke at jeg liker ham", "hun vet ikke at jeg liker henne", "si det til han", "si det til henne", "flørter han med meg", "flørter hun med meg", "tegn på at han liker meg", "tegn på at hun liker meg", "nærme seg", "ta kontakt med"]
+      "label": "forelskelse_og_kjaerlighetsfølelser",
+      "keywords": [
+        "jeg liker en gutt", "jeg liker ei jente", "liker noen i klassen",
+        "hvordan si at jeg liker", "tørr ikke si det", "han vet ikke at jeg liker ham",
+        "hun vet ikke at jeg liker henne", "si det til han", "si det til henne",
+        "flørter han med meg", "tegn på at han liker meg", "tegn på at hun liker meg",
+        "forelsket", "klarer ikke slutte å tenke på", "tenker på han hele tiden",
+        "tenker på henne hele tiden", "sommerfugler i magen", "savner han", "savner henne",
+        "hjertesorg", "ulykkelig forelsket", "liker to personer",
+        "forelsket i bestevennen", "forelsket i bestevenninna",
+        "forelsket i en eldre", "aldersforskjell kjæreste"
+      ]
     },
     {
       "label": "menstruasjon_periode_smerter",
@@ -121,12 +136,14 @@
       ]
     },
     {
-      "label": "familie_hjemmeforhold_konflikt",
-      "keywords": ["kontrollerende foreldre", "foreldre leser meldingene", "foreldre bestemmer alt", "ikke får lov", "strengt hjemme", "foreldre skjønner ikke", "foreldre godtar ikke", "foreldrene mine er religiøse", "kulturforskjell hjemme", "ikke får ha kjæreste", "ikke lov å gå ut", "må lyve for foreldrene", "hemmelig for foreldre"]
-    },
-    {
       "label": "vennskap_sosiale_problemer",
-      "keywords": ["ingen venner", "ensom på skolen", "utestengt fra gjengen", "venner baksnakker meg", "bestevennen sviktet", "venner har forlatt meg", "ny på skolen uten venner", "passer ikke inn", "ekskludert fra gruppen", "mobbing fra venner", "falske venner", "venninner er slemme", "ikke invitert", "alene i friminuttet"]
+      "keywords": [
+        "ingen venner", "ensom på skolen", "utestengt fra gjengen",
+        "venner baksnakker meg", "bestevennen sviktet", "venner har forlatt meg",
+        "ny på skolen uten venner", "passer ikke inn", "ekskludert fra gruppen",
+        "mobbing fra venner", "falske venner", "venninner er slemme",
+        "ikke invitert", "alene i friminuttet"
+      ]
     },
     {
       "label": "seksuelt_overgrep_grenser_ung",

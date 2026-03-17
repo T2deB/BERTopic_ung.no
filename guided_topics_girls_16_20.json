@@ -94,11 +94,21 @@
     },
     {
       "label": "kjonnsykdommer_testing_smitte",
-      "keywords": ["klamydiatest", "tatt klamydiatest", "positiv klamydia", "herpes utbrudd", "herpes smitte", "hpv vaksine", "kjønnsvortter", "utflod som lukter", "grønn utflod", "brent når jeg tisser", "sår på kjønnsorganet", "sopp i underlivet", "sti test", "testing klamydia", "smittet kjønnssykdom"]
+      "keywords": [
+        "klamydiatest", "tatt klamydiatest", "positiv klamydia", "herpes utbrudd",
+        "herpes smitte", "hpv vaksine", "kjønnsvortter", "utflod som lukter",
+        "grønn utflod", "brenner når jeg tisser", "sår på kjønnsorganet",
+        "sopp i underlivet", "sti test", "testing klamydia", "smittet kjønnssykdom"
+      ]
     },
     {
       "label": "abort_svangerskapsavbrudd",
-      "keywords": ["ta abort", "tenker på abort", "bestilt aborttime", "abortpille", "medisinsk abort", "kirurgisk abort", "etter abort", "angrer på abort", "ikke vil bli gravid", "partner vil ikke abort", "fortelle partner om abort", "abort alene", "abort ung", "rett til abort", "abort Norge"]
+      "keywords": [
+        "ta abort", "tenker på abort", "bestilt aborttime", "abortpille",
+        "medisinsk abort", "kirurgisk abort", "etter abort", "angrer på abort",
+        "ikke vil bli gravid", "partner vil ikke abort", "fortelle partner om abort",
+        "abort alene", "abort ung", "rett til abort", "abort Norge"
+      ]
     },
     {
       "label": "studievalg_laanekassen_opptak",
@@ -118,7 +128,12 @@
     },
     {
       "label": "psykisk_helse_behandling",
-      "keywords": ["ventetid psykolog", "komme til psykolog", "DPS venter", "BUP venter", "ikke får hjelp", "avvist psykolog", "for dårlig for hjelp", "for frisk for hjelp", "fastlegen vil ikke henvise", "behandling psykisk helse", "terapi virker ikke", "bytte terapeut", "privat psykolog pris", "PPT hjelp"]
+      "keywords": [
+        "ventetid psykolog", "komme til psykolog", "DPS venter", "BUP venter",
+        "ikke får hjelp", "avvist psykolog", "for dårlig for hjelp", "for frisk for hjelp",
+        "fastlegen vil ikke henvise", "behandling psykisk helse", "terapi virker ikke",
+        "bytte terapeut", "privat psykolog pris", "PPT hjelp"
+      ]
     },
     {
       "label": "kjæreste_tillit_relasjon",
@@ -147,7 +162,12 @@
     },
     {
       "label": "seksuell_erfaring_anatomi",
-      "keywords": ["vondt under sex", "klitoris stimulering", "får ikke orgasme", "aldri hatt orgasme", "tørr ikke under sex", "spent under sex", "blør etter sex", "smerter under samleie", "ikke våt nok", "lubrikasjon", "første gang sex smerter", "normal vagina", "kjønnslepper", "skjede", "hymen", "jomfruhinne"]
+      "keywords": [
+        "vondt under sex", "klitoris stimulering", "får ikke orgasme", "aldri hatt orgasme",
+        "tørr ikke under sex", "spent under sex", "blør etter sex", "smerter under samleie",
+        "ikke våt nok", "lubrikasjon", "første gang sex smerter", "normal vagina",
+        "kjønnslepper", "skjede", "hymen", "jomfruhinne"
+      ]
     },
     {
       "label": "okonomi_trygd_stoette",
@@ -159,7 +179,12 @@
     },
     {
       "label": "jobbrettigheter_laerling_lonn",
-      "keywords": ["ikke fått lønn", "sjefen betaler ikke", "ulovlig oppsagt", "oppsigelse rettigheter", "arbeidskontrakt", "midlertidig ansatt rettigheter", "lærlingplass rettigheter", "lærling lønn", "lærlingkontrakt", "fagbrev forberedelse", "fagprøve", "lærling konflikt arbeidsgiver", "vikar rettigheter", "deltidsjobb rettigheter"]
+      "keywords": [
+        "ikke fått lønn", "sjefen betaler ikke", "ulovlig oppsagt", "oppsigelse rettigheter",
+        "arbeidskontrakt", "midlertidig ansatt rettigheter", "lærlingplass rettigheter",
+        "lærling lønn", "lærlingkontrakt", "fagbrev forberedelse", "fagprøve",
+        "lærling konflikt arbeidsgiver", "vikar rettigheter", "deltidsjobb rettigheter"
+      ]
     },
     {
       "label": "alkohol_fest_helse",
