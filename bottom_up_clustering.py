@@ -1233,6 +1233,30 @@ def main() -> None:
     if "body_norm" not in idx.columns:
         raise ValueError("Index is missing body_norm column")
 
+    # --- Age join checkpoint ---
+    print()
+    print("=" * 60)
+    print(f"  Age join result:  {age_col_used}")
+    print(f"  Coverage:         {age_coverage:.1%}")
+    if "age" in idx.columns:
+        age_num = pd.to_numeric(idx["age"], errors="coerce")
+        print(f"  Numeric age rows: {int(age_num.notna().sum()):,} / {len(idx):,}")
+        print(f"  Age range:        {int(age_num.min())}–{int(age_num.max())}")
+        for seg in SEGMENTS:
+            mask = build_segment_mask(idx, seg["gender"], seg["age_min"], seg["age_max"])
+            seg_ages = age_num[mask].dropna()
+            n = int(mask.sum())
+            age_range = f"{int(seg_ages.min())}–{int(seg_ages.max())}" if len(seg_ages) else "n/a"
+            print(f"  {seg['name']:20s}  n={n:>7,}  age range={age_range}")
+    else:
+        print("  No numeric age column — string fallback will be used.")
+    print("=" * 60)
+    ans = input("  Continue with clustering? [y/N] ").strip().lower()
+    if ans not in ("y", "yes"):
+        print("[abort] Exiting before clustering. Fix the age join and re-run.")
+        return
+    print()
+
     if RUN_SEGMENTED:
         base = outdir / SEGMENT_OUTPUT_SUBDIR
         base.mkdir(parents=True, exist_ok=True)
