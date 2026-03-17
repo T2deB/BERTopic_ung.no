@@ -1009,6 +1009,7 @@ def run_one_segment(
     sampling_n_used = len(sample_idx)
     transform_n_used = 0
     n_fuzzy_clusters = FUZZY_N_CLUSTERS_BY_SEGMENT.get(seg_name, FUZZY_N_CLUSTERS)  # updated inside fuzzy block
+    bertopic_count: int = 0   # set in guided path; 0 means non-guided run
 
     if USE_FUZZY_BERTOPIC:
         # Per-segment cluster count; falls back to global FUZZY_N_CLUSTERS for unknown names
@@ -1017,15 +1018,20 @@ def run_one_segment(
               f"(from {'FUZZY_N_CLUSTERS_BY_SEGMENT' if seg_name in FUZZY_N_CLUSTERS_BY_SEGMENT else 'FUZZY_N_CLUSTERS fallback'})")
 
         if USE_BERTOPIC_GUIDED and seed_topic_list:
-            # Discover cluster structure with guided BERTopic, then use that count for fuzzy c-means
+            # Discover cluster structure with guided BERTopic, then cap at per-segment limit
             guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
-            n_fuzzy_clusters = int(len(set(guided_labels[guided_labels >= 0])))
-            if n_fuzzy_clusters < 2:
+            bertopic_count = int(len(set(guided_labels[guided_labels >= 0])))
+            if bertopic_count < 2:
                 warnings.warn(
                     f"Guided BERTopic found <2 clusters for {seg_name}; "
                     f"using per-segment default n_clusters={seg_n_clusters}"
                 )
-                n_fuzzy_clusters = seg_n_clusters
+                bertopic_count = seg_n_clusters
+            n_fuzzy_clusters = min(bertopic_count, seg_n_clusters)
+            print(
+                f"Segment {seg_name}: BERTopic found {bertopic_count} clusters, "
+                f"capped at {seg_n_clusters} → using {n_fuzzy_clusters} for fuzzy c-means."
+            )
             mode = "fuzzy_bertopic_guided"
         else:
             n_fuzzy_clusters = seg_n_clusters
@@ -1215,7 +1221,9 @@ def run_one_segment(
         "age_split_note": "Exact 13-15/16-20 requires numeric age column. age_group fallback is approximate.",
         "fuzzy": {
             "enabled": USE_FUZZY_BERTOPIC,
-            "n_clusters": n_fuzzy_clusters if USE_FUZZY_BERTOPIC else None,
+            "n_clusters_bertopic": bertopic_count if (USE_FUZZY_BERTOPIC and USE_BERTOPIC_GUIDED) else None,
+            "n_clusters_cap": seg_n_clusters if USE_FUZZY_BERTOPIC else None,
+            "n_clusters_used": n_fuzzy_clusters if USE_FUZZY_BERTOPIC else None,
             "m": FUZZY_M if USE_FUZZY_BERTOPIC else None,
             "membership_stored": full_membership is not None,
         },
