@@ -1,5 +1,5 @@
 {
-  "_version": "1.0 — initial segment split",
+  "_version": "1.1 — filled empty topics, sharpened familie",
   "topics": [
     {
       "label": "trang_forhud_og_testikler",
@@ -63,7 +63,14 @@
     },
     {
       "label": "familie_konflikt_foreldre",
-      "keywords": ["skilte foreldre", "mamma krangler", "pappa krangler", "foreldre kontroll", "pappa bor", "kommer hjem", "får lov"]
+      "keywords": [
+        "skilte foreldre", "mamma og pappa krangler", "foreldre skilles",
+        "pappa drikker", "mamma drikker", "ikke trygg hjemme",
+        "vanskelig hjemme", "steforeldre", "stefar er slem",
+        "vil ikke bo hjemme", "foreldre kontrollerer meg",
+        "foreldre leser meldingene mine", "ikke får lov hjemme",
+        "strengt hjemme", "redd pappa"
+      ]
     },
     {
       "label": "forelskelse_folelser_for_en_person",
@@ -79,19 +86,43 @@
     },
     {
       "label": "venner_konflikter_mobbing",
-      "keywords": []
+      "keywords": [
+        "ingen venner", "ensom på skolen", "utestengt fra gjengen",
+        "kompis baksnakker meg", "bestekompisen sviktet", "venner har forlatt meg",
+        "ny på skolen uten venner", "passer ikke inn", "ekskludert fra gruppen",
+        "mobbing fra venner", "falske venner", "ikke invitert",
+        "alene i friminuttet", "kompiser er slemme"
+      ]
     },
     {
       "label": "kjønnsidentitet_seksualitet_usikkerhet",
-      "keywords": []
+      "keywords": [
+        "er jeg homo", "er jeg bifil", "liker gutter", "liker jenter",
+        "usikker på legningen min", "kanskje homo", "kanskje bifil",
+        "kjønnsidentitet", "føler meg som jente", "kanskje trans",
+        "coming out", "fortelle at jeg er homo", "fortelle foreldrene",
+        "skeiv", "seksuell legning"
+      ]
     },
     {
       "label": "karakter_snitt_skolepress",
-      "keywords": []
+      "keywords": [
+        "karaktersnittet mitt", "dårlige karakterer", "stryker faget",
+        "stressa for skolen", "skolepress", "ikke klarer eksamen",
+        "lavt snitt", "snitt for å komme inn", "droppe ut av vgs",
+        "skolen er for vanskelig", "ikke motivasjon for skolen",
+        "skulker skolen", "skolevegring"
+      ]
     },
     {
       "label": "kropp_utvikling_pubertet_gutt",
-      "keywords": []
+      "keywords": [
+        "kommet i puberteten", "ikke kommet i puberteten", "stemmen sprekker",
+        "sen i utviklingen", "tidlig i puberteten", "skjegg gutt",
+        "penis størrelse normal", "normal penis", "testiklene vokser",
+        "underarmshår", "kjønnshår", "akselhår", "kviser puberteten",
+        "vokse mer", "vokst ferdig"
+      ]
     }
   ]
 }

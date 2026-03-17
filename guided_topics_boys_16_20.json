@@ -1,5 +1,5 @@
 {
-  "_version": "1.1 — filled keywords for 16-20 topics",
+  "_version": "1.2 — merged crisis/rus/jobb topics, sharpened eksamen vs karakter",
   "topics": [
     {
       "label": "trang_forhud_og_testikler",
@@ -22,8 +22,13 @@
       "keywords": ["første gang", "gjør vondt", "får orgasme", "våt nok", "kåt nok", "stimulere klitoris", "bruke fingrene"]
     },
     {
-      "label": "rus_hasj_og_alkohol",
-      "keywords": ["røyket hasj", "røyka hasj", "røyker hasj", "drikke alkohol", "kjøpe alkohol", "urin prøve", "tatt kokain"]
+      "label": "rus_narkotika_og_alkohol",
+      "keywords": [
+        "røyket hasj", "røyka hasj", "røyker hasj", "røyke hasj",
+        "drikke alkohol", "kjøpe alkohol", "urin prøve", "narkotikatest",
+        "hasj", "weed", "cannabis", "kokain", "amfetamin", "mdma", "ecstasy",
+        "badtrip", "overdose", "rusa", "cannabisplante"
+      ]
     },
     {
       "label": "snus_og_nikotin",
@@ -34,8 +39,13 @@
       "keywords": ["sosial angst", "tvangs tanker", "dårlige tanker", "psykisk lidelse", "psykiske problemer", "sosiale settinger", "sosiale situasjoner"]
     },
     {
-      "label": "selvskading_og_selvmordstanker",
-      "keywords": ["selvmords tanker", "drepe meg selv", "gjør selvskading", "trenger hjelp", "trist hele", "leve lenger", "leve mer"]
+      "label": "selvskading_selvmord_og_krise",
+      "keywords": [
+        "selvmordstanker", "selvmords tanker", "ta livet mitt", "drepe meg selv",
+        "vil ikke leve", "gjør selvskading", "kutte meg", "skade meg selv",
+        "angstanfall", "panikkanfall", "suicidalitet", "depresjon alvorlig",
+        "innlagt psykiatri", "akutt psykisk hjelp", "ringe kristelefon"
+      ]
     },
     {
       "label": "vgs_opptak_og_studiekompetanse",
@@ -43,7 +53,11 @@
     },
     {
       "label": "eksamen_og_privatist",
-      "keywords": ["privatist eksamen", "muntlig eksamen", "skriftlig eksamen", "første året", "siste året", "høyt snitt", "engelsk fordypning"]
+      "keywords": [
+        "muntlig eksamen", "skriftlig eksamen", "eksamen forberedelse",
+        "trekkfag eksamen", "eksamen nervøs", "eksamen strøk",
+        "ikke møtt til eksamen", "utsatt eksamen", "eksamen hjelpemidler"
+      ]
     },
     {
       "label": "skolehverdag_anmerkning_og_larer",
@@ -54,8 +68,14 @@
       "keywords": ["trafikalt grunnkurs", "førerkort klasse", "bil lappen", "mistet lappen", "mistet førerkortet", "statens vegvesen", "lett motorsykkel"]
     },
     {
-      "label": "jobb_lonn_og_stilling",
-      "keywords": ["søke jobb", "høyere lønn", "fast stilling", "fast ansatt", "får betalt", "får lønn", "jobber timer"]
+      "label": "jobb_lonn_og_rettigheter",
+      "keywords": [
+        "søke jobb", "høyere lønn", "fast stilling", "fast ansatt",
+        "får betalt", "får lønn", "jobber timer",
+        "sagt opp", "oppsigelse", "arbeidsgiver", "arbeidskontrakt",
+        "arbeidstid", "overtid betaling", "fagforening",
+        "arbeidsmiljøloven", "sykemelding jobb", "varsle arbeidsgiver"
+      ]
     },
     {
       "label": "hverdagsjus_politi_og_forelegg",
@@ -87,9 +107,10 @@
     {
       "label": "skole_karakter_privatist",
       "keywords": [
-        "standpunktkarakter", "vitnemål", "strykfag", "stryk eksamen",
-        "ta opp fag", "privatist", "påbygg", "konteksamen", "snittet",
-        "karakterer vg", "forbedre karakter"
+        "standpunktkarakter", "vitnemål", "strykfag", "ta opp fag",
+        "privatist", "påbygg", "forbedre karakter", "karaktersnittet",
+        "karakterer vg", "ikke bestått", "ny eksamen privatist",
+        "melde seg som privatist", "konteksamen"
       ]
     },
     {
@@ -98,14 +119,6 @@
         "samordna opptak", "studiepoeng", "bachelor", "høyskolepoeng",
         "hva skal jeg studere", "vet ikke hva jeg vil bli",
         "studiested", "studiespesialisering", "realfag studier"
-      ]
-    },
-    {
-      "label": "rus_narkotika_sporsmal",
-      "keywords": [
-        "hasj", "weed", "kokain", "amfetamin", "mdma", "ecstasy",
-        "badtrip", "overdose", "rusa", "cannabisplante",
-        "snuse", "røyke hasj", "narkotikatest"
       ]
     },
     {
@@ -125,27 +138,11 @@
       ]
     },
     {
-      "label": "jobbrettigheter_arbeidskontrakt",
-      "keywords": [
-        "sagt opp", "oppsigelse", "arbeidsgiver", "arbeidskontrakt",
-        "arbeidstid", "overtid betaling", "fagforening",
-        "arbeidsmiljøloven", "sykemelding jobb", "varsle arbeidsgiver"
-      ]
-    },
-    {
       "label": "kjønnsidentitet_seksualitet_usikkerhet",
       "keywords": [
         "homofil", "bifil", "skeiv", "seksuell legning",
         "kjønnsidentitet", "er jeg homo", "usikker på legning",
         "liker gutter", "kanskje bifil", "coming out"
-      ]
-    },
-    {
-      "label": "psykisk_helse_krise",
-      "keywords": [
-        "selvmordstanker", "ta livet mitt", "selvskading", "kutte meg",
-        "angstanfall", "panikkanfall", "suicidalitet",
-        "depresjon alvorlig", "vil ikke leve"
       ]
     },
     {
