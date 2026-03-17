@@ -239,7 +239,7 @@ def build_age_lookup_from_raw(data_dir: Path) -> pd.DataFrame:
         try:
             chunk = pd.read_csv(
                 p, usecols=[text_col, "age"],
-                dtype={"age": "Int64"},
+                dtype={text_col: str, "age": str},  # read as str; coerce "-"/blanks to NaN after
                 encoding="utf-8-sig",
                 low_memory=True,
             )
@@ -327,7 +327,10 @@ def enrich_with_exact_age(idx: pd.DataFrame, outdir: Path) -> Tuple[pd.DataFrame
         try:
             lkp2 = pd.read_parquet(lookup_path, columns=["body_norm", "createdAt", "age"])
             lkp2 = lkp2.drop_duplicates(subset=["body_norm", "createdAt"])
-            enriched = idx.merge(lkp2, on=["body_norm", "createdAt"], how="left")
+            lkp2["createdAt"] = lkp2["createdAt"].astype(str)
+            idx_tmp = idx.copy()
+            idx_tmp["createdAt"] = idx_tmp["createdAt"].astype(str)
+            enriched = idx_tmp.merge(lkp2, on=["body_norm", "createdAt"], how="left")
             age_numeric = pd.to_numeric(enriched["age"], errors="coerce")
             fill_rate = float(age_numeric.notna().mean())
             if fill_rate >= _FILL_THRESHOLD:
