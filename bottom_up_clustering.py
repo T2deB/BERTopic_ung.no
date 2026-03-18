@@ -63,13 +63,14 @@ USE_BERTOPIC_GUIDED = True
 
 # Fuzzy BERTopic (Nikbakht & Zojaji, 2026)
 USE_FUZZY_BERTOPIC = True   # set True to activate fuzzy c-means mode
-FUZZY_N_CLUSTERS = 50        # fallback cluster count for unknown segment names
-FUZZY_N_CLUSTERS_BY_SEGMENT = {
-    "boys_13_15":  80,
-    "boys_16_20":  60,
-    "girls_13_15": 80,
-    "girls_16_20": 80,
-}
+FUZZY_N_CLUSTERS = 50        # fallback when formula cannot run (no guided topics, non-guided mode)
+# Data-driven cluster count formula (replaces fixed per-segment caps):
+#   base  = max(40, min(200, round(n_docs / 500)))
+#   final = min(bertopic_count, base + round(n_guided * 1.5))
+FUZZY_FORMULA_DOCS_PER_CLUSTER = 500   # target docs per cluster
+FUZZY_FORMULA_MIN_CLUSTERS     = 40
+FUZZY_FORMULA_MAX_CLUSTERS     = 200
+FUZZY_FORMULA_GUIDED_FACTOR    = 1.5   # extra headroom per guided topic
 FUZZY_M = 2.0                # fuzziness exponent (m=2 is standard)
 FUZZY_BATCH_SIZE = 5000      # doc-batch size for TI accumulation and membership prediction
 
@@ -952,6 +953,79 @@ def build_segment_mask(idx: pd.DataFrame, gender: str, age_min: int, age_max: in
     return (gmask & amask).to_numpy()
 
 
+def compute_cluster_coherence(
+    out_assign: pd.DataFrame,
+    embs: np.ndarray,
+    max_sample: int = 200,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """Compute intra-cluster coherence scores using the L2-normalised embeddings.
+
+    For each cluster returns:
+        centroid_sim_mean  – mean cosine similarity of members to their centroid
+        centroid_sim_std   – std of above (high = scattered)
+        intra_sim_mean     – mean pairwise cosine similarity (sampled, up to max_sample)
+
+    Clusters with fewer than 10 members receive NaN scores.
+    Results are sorted by centroid_sim_mean ascending so scattered clusters appear first.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+
+    # Thresholds used in the printed summary — adjust here as needed
+    TIGHT_THRESHOLD     = 0.70
+    SCATTERED_THRESHOLD = 0.50
+
+    rng = np.random.default_rng(random_state)
+    valid = out_assign[out_assign["cluster_id"] >= 0]
+    results = []
+
+    for cid in sorted(valid["cluster_id"].unique()):
+        row_idx = valid[valid["cluster_id"] == cid].index.values
+        vecs = embs[row_idx].astype(np.float32)
+        size = len(vecs)
+
+        if size < 10:
+            results.append({
+                "cluster_id": int(cid), "size": size,
+                "centroid_sim_mean": np.nan,
+                "centroid_sim_std": np.nan,
+                "intra_sim_mean": np.nan,
+            })
+            continue
+
+        centroid = vecs.mean(axis=0, keepdims=True)
+        sims = _cos_sim(vecs, centroid).flatten()
+
+        sample_idx = rng.choice(size, size=min(max_sample, size), replace=False)
+        sample_vecs = vecs[sample_idx]
+        pairwise = _cos_sim(sample_vecs)
+        upper = pairwise[np.triu_indices(len(sample_vecs), k=1)]
+
+        results.append({
+            "cluster_id": int(cid),
+            "size": size,
+            "centroid_sim_mean": round(float(sims.mean()), 4),
+            "centroid_sim_std":  round(float(sims.std()),  4),
+            "intra_sim_mean":    round(float(upper.mean()), 4) if len(upper) > 0 else np.nan,
+        })
+
+    df_coh = pd.DataFrame(results).sort_values("centroid_sim_mean", ascending=True)
+
+    # Console summary
+    n_scored  = int(df_coh["centroid_sim_mean"].notna().sum())
+    mean_intra = df_coh["intra_sim_mean"].mean()
+    tight     = int((df_coh["centroid_sim_mean"] > TIGHT_THRESHOLD).sum())
+    scattered = int((df_coh["centroid_sim_mean"] < SCATTERED_THRESHOLD).sum())
+    seg_label = out_assign.get("segment", pd.Series(["?"])).iloc[0] if "segment" in out_assign.columns else "segment"
+    print(f"Cluster coherence summary:")
+    print(f"  Clusters scored: {n_scored}")
+    print(f"  Mean intra-cluster similarity: {mean_intra:.3f}" if not np.isnan(mean_intra) else "  Mean intra-cluster similarity: n/a")
+    print(f"  Tight clusters    (centroid_sim_mean > {TIGHT_THRESHOLD}): {tight}")
+    print(f"  Scattered clusters (centroid_sim_mean < {SCATTERED_THRESHOLD}): {scattered}  ← review these")
+
+    return df_coh
+
+
 def run_one_segment(
     seg_name: str,
     outdir: Path,
@@ -1008,33 +1082,48 @@ def run_one_segment(
     sampling_method = "sample_fit"
     sampling_n_used = len(sample_idx)
     transform_n_used = 0
-    n_fuzzy_clusters = FUZZY_N_CLUSTERS_BY_SEGMENT.get(seg_name, FUZZY_N_CLUSTERS)  # updated inside fuzzy block
-    bertopic_count: int = 0   # set in guided path; 0 means non-guided run
+    n_fuzzy_clusters = FUZZY_N_CLUSTERS   # overridden below in fuzzy block
+    bertopic_count: int = 0              # set in guided path; 0 means non-guided run
+    base_clusters:  int = 0
+    guided_headroom: int = 0
+    formula_count:  int = 0
 
     if USE_FUZZY_BERTOPIC:
-        # Per-segment cluster count; falls back to global FUZZY_N_CLUSTERS for unknown names
-        seg_n_clusters = FUZZY_N_CLUSTERS_BY_SEGMENT.get(seg_name, FUZZY_N_CLUSTERS)
-        print(f"[segment:{seg_name}] fuzzy n_clusters={seg_n_clusters} "
-              f"(from {'FUZZY_N_CLUSTERS_BY_SEGMENT' if seg_name in FUZZY_N_CLUSTERS_BY_SEGMENT else 'FUZZY_N_CLUSTERS fallback'})")
-
         if USE_BERTOPIC_GUIDED and seed_topic_list:
-            # Discover cluster structure with guided BERTopic, then cap at per-segment limit
+            # Run guided BERTopic to discover cluster structure
             guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
             bertopic_count = int(len(set(guided_labels[guided_labels >= 0])))
+
+            # Data-driven formula: base on corpus size + guided topic density
+            n_guided = len(seed_labels)
+            base_clusters   = max(FUZZY_FORMULA_MIN_CLUSTERS,
+                                  min(FUZZY_FORMULA_MAX_CLUSTERS,
+                                      round(n_total / FUZZY_FORMULA_DOCS_PER_CLUSTER)))
+            guided_headroom = round(n_guided * FUZZY_FORMULA_GUIDED_FACTOR)
+            formula_count   = base_clusters + guided_headroom
+
             if bertopic_count < 2:
                 warnings.warn(
                     f"Guided BERTopic found <2 clusters for {seg_name}; "
-                    f"using per-segment default n_clusters={seg_n_clusters}"
+                    f"using formula count={formula_count}"
                 )
-                bertopic_count = seg_n_clusters
-            n_fuzzy_clusters = min(bertopic_count, seg_n_clusters)
+                bertopic_count = formula_count
+
+            n_fuzzy_clusters = min(bertopic_count, formula_count)
             print(
-                f"Segment {seg_name}: BERTopic found {bertopic_count} clusters, "
-                f"capped at {seg_n_clusters} → using {n_fuzzy_clusters} for fuzzy c-means."
+                f"Segment {seg_name}: n_docs={n_total}, n_guided={n_guided}, "
+                f"formula={formula_count} (base={base_clusters}+headroom={guided_headroom}), "
+                f"bertopic={bertopic_count} → using n_fuzzy_clusters={n_fuzzy_clusters}"
             )
             mode = "fuzzy_bertopic_guided"
         else:
-            n_fuzzy_clusters = seg_n_clusters
+            # No guided topics — formula without guided headroom
+            base_clusters  = max(FUZZY_FORMULA_MIN_CLUSTERS,
+                                 min(FUZZY_FORMULA_MAX_CLUSTERS,
+                                     round(n_total / FUZZY_FORMULA_DOCS_PER_CLUSTER)))
+            formula_count  = base_clusters
+            n_fuzzy_clusters = formula_count
+            print(f"[segment:{seg_name}] no guided topics; formula n_fuzzy_clusters={n_fuzzy_clusters}")
             mode = "fuzzy_bertopic"
 
         # Attempt A — full-corpus fit (only when segment exceeds sample cap)
@@ -1185,7 +1274,17 @@ def run_one_segment(
             "top_bigrams": top_bigrams.get(cid, ""),
             "exemplar_text": str(exemplar)[:400].replace("\n", " "),
         })
-    pd.DataFrame(rows).sort_values("size", ascending=False).to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
+    catalog_df = pd.DataFrame(rows).sort_values("size", ascending=False)
+
+    # Coherence scoring — uses the original L2-normalised embeddings (already in memory)
+    print(f"[segment:{seg_name}] computing cluster coherence scores...")
+    coherence_df = compute_cluster_coherence(out_assign, embs_seg)
+    coherence_df.to_csv(outdir / "cluster_coherence_scores.csv", index=False, encoding="utf-8")
+    catalog_df = catalog_df.merge(
+        coherence_df[["cluster_id", "centroid_sim_mean", "centroid_sim_std", "intra_sim_mean"]],
+        on="cluster_id", how="left",
+    )
+    catalog_df.to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
 
     sampling_entry: dict = {
         "size": SAMPLE_SIZE,
@@ -1221,9 +1320,11 @@ def run_one_segment(
         "age_split_note": "Exact 13-15/16-20 requires numeric age column. age_group fallback is approximate.",
         "fuzzy": {
             "enabled": USE_FUZZY_BERTOPIC,
+            "n_clusters_formula": formula_count if USE_FUZZY_BERTOPIC else None,
             "n_clusters_bertopic": bertopic_count if (USE_FUZZY_BERTOPIC and USE_BERTOPIC_GUIDED) else None,
-            "n_clusters_cap": seg_n_clusters if USE_FUZZY_BERTOPIC else None,
             "n_clusters_used": n_fuzzy_clusters if USE_FUZZY_BERTOPIC else None,
+            "formula_base": base_clusters if USE_FUZZY_BERTOPIC else None,
+            "formula_guided_headroom": guided_headroom if USE_FUZZY_BERTOPIC else None,
             "m": FUZZY_M if USE_FUZZY_BERTOPIC else None,
             "membership_stored": full_membership is not None,
         },

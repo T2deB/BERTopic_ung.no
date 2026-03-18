@@ -450,26 +450,54 @@ def write_consolidated_excel(
             except Exception:
                 pass
 
+    # Load coherence scores if available
+    coherence: dict[int, dict] = {}
+    coh_path = assign_path.parent / "cluster_coherence_scores.csv"
+    if coh_path.exists():
+        try:
+            coh_df = pd.read_csv(coh_path)
+            for _, row in coh_df.iterrows():
+                coherence[int(row["cluster_id"])] = {
+                    "centroid_sim_mean": row.get("centroid_sim_mean"),
+                    "centroid_sim_std":  row.get("centroid_sim_std"),
+                    "intra_sim_mean":    row.get("intra_sim_mean"),
+                }
+        except Exception:
+            pass
+
     clustered = df[df["cluster_id"] >= 0].copy()
 
-    # Sheet order: largest cluster first
-    if "size" in overview.columns:
+    # Sheet order: sort by centroid_sim_mean ascending (scattered first) when available,
+    # otherwise fall back to size descending
+    if coherence:
+        def _sort_key(cid: int):
+            v = coherence.get(cid, {}).get("centroid_sim_mean")
+            return (1, float("inf")) if v is None or (isinstance(v, float) and np.isnan(v)) else (0, v)
+        all_cids = overview["cluster_id"].astype(int).tolist() if "cluster_id" in overview.columns else list(clustered["cluster_id"].unique())
+        sorted_cids = sorted(all_cids, key=_sort_key)
+    elif "size" in overview.columns:
         sorted_cids = overview.sort_values("size", ascending=False)["cluster_id"].astype(int).tolist()
     else:
-        counts = clustered["cluster_id"].value_counts()
-        sorted_cids = counts.index.tolist()
+        sorted_cids = clustered["cluster_id"].value_counts().index.tolist()
+
+    overview_header =["cluster_id", "size", "centroid_sim_mean", "centroid_sim_std", "intra_sim_mean",
+                       "top5_unigrams", "top5_bigrams", "coherence_rating"]
 
     wb = Workbook(write_only=True)
 
     # ── OVERVIEW sheet ────────────────────────────────────────────────────────
     ws_ov = wb.create_sheet("OVERVIEW")
-    ws_ov.append(["cluster_id", "size", "top5_unigrams", "top5_bigrams", "coherence_rating"])
+    ws_ov.append(overview_header)
     for cid in sorted_cids:
         size_rows = overview[overview["cluster_id"] == cid]
         size = int(size_rows["size"].iloc[0]) if len(size_rows) else 0
+        coh = coherence.get(cid, {})
         ws_ov.append([
             cid,
             size,
+            coh.get("centroid_sim_mean"),
+            coh.get("centroid_sim_std"),
+            coh.get("intra_sim_mean"),
             ", ".join(uni_kw.get(cid, [])[:5]),
             ", ".join(bi_kw.get(cid,  [])[:5]),
             "",
