@@ -409,6 +409,109 @@ def write_fuzzy_topic_words(
         )
 
 
+def write_consolidated_excel(
+    df: pd.DataFrame,
+    overview: pd.DataFrame,
+    assign_path: Path,
+    out_path: Path,
+    sample_n: int = 20,
+    truncate_chars: int = 120,
+) -> int:
+    """Write cluster_review_consolidated.xlsx — one sheet per cluster, OVERVIEW first.
+
+    Each cluster sheet has a brief metadata header (size, top-10 unigrams/bigrams)
+    followed by up to *sample_n* randomly sampled questions and an empty
+    ``coherence_rating`` column for the human reviewer.
+
+    Sheets are ordered by cluster size descending so the largest topics appear
+    first.  Text is truncated to *truncate_chars* and write_only streaming is
+    used to keep the file as small as possible.
+
+    Returns the number of cluster sheets written, or 0 if openpyxl is missing.
+    """
+    try:
+        from openpyxl import Workbook  # type: ignore
+    except ImportError:
+        print("[excel] openpyxl not installed — skipping cluster_review_consolidated.xlsx "
+              "(pip install openpyxl)")
+        return 0
+
+    # Load unigram / bigram keyword files
+    uni_kw: dict[int, list[str]] = {}
+    bi_kw:  dict[int, list[str]] = {}
+    for fname, dest in [
+        ("clusters_keywords_unigrams.csv", uni_kw),
+        ("clusters_keywords_bigrams.csv",  bi_kw),
+    ]:
+        fpath = assign_path.parent / fname
+        if fpath.exists():
+            try:
+                kdf = pd.read_csv(fpath)
+                for cid, grp in kdf.groupby("cluster_id"):
+                    dest[int(cid)] = grp.sort_values("rank")["term"].head(10).tolist()
+            except Exception:
+                pass
+
+    clustered = df[df["cluster_id"] >= 0].copy()
+
+    # Sheet order: largest cluster first
+    if "size" in overview.columns:
+        sorted_cids = overview.sort_values("size", ascending=False)["cluster_id"].astype(int).tolist()
+    else:
+        counts = clustered["cluster_id"].value_counts()
+        sorted_cids = counts.index.tolist()
+
+    wb = Workbook(write_only=True)
+
+    # ── OVERVIEW sheet ────────────────────────────────────────────────────────
+    ws_ov = wb.create_sheet("OVERVIEW")
+    ws_ov.append(["cluster_id", "size", "top5_unigrams", "top5_bigrams", "coherence_rating"])
+    for cid in sorted_cids:
+        size_rows = overview[overview["cluster_id"] == cid]
+        size = int(size_rows["size"].iloc[0]) if len(size_rows) else 0
+        ws_ov.append([
+            cid,
+            size,
+            ", ".join(uni_kw.get(cid, [])[:5]),
+            ", ".join(bi_kw.get(cid,  [])[:5]),
+            "",
+        ])
+
+    # ── One sheet per cluster ─────────────────────────────────────────────────
+    for cid in sorted_cids:
+        size_rows = overview[overview["cluster_id"] == cid]
+        size = int(size_rows["size"].iloc[0]) if len(size_rows) else 0
+
+        ws = wb.create_sheet(f"cluster_{cid}")
+        ws.append([f"cluster_id: {cid}", f"size: {size}", "", ""])
+        ws.append([
+            "unigrams (top 10):",
+            ", ".join(uni_kw.get(cid, [])[:10]),
+            "", "",
+        ])
+        ws.append([
+            "bigrams (top 10):",
+            ", ".join(bi_kw.get(cid, [])[:10]),
+            "", "",
+        ])
+        ws.append([])                               # blank separator
+        ws.append(["question_sample", "coherence_rating"])
+
+        cluster_docs = clustered[clustered["cluster_id"] == cid]["body_norm"]
+        sampled = (
+            cluster_docs.sample(n=sample_n, random_state=42)
+            if len(cluster_docs) > sample_n
+            else cluster_docs
+        )
+        for text in sampled:
+            ws.append([str(text)[:truncate_chars], ""])
+
+    wb.save(out_path)
+    n = len(sorted_cids)
+    print(f"Consolidated review file written: cluster_review_consolidated.xlsx ({n} clusters)")
+    return n
+
+
 def write_topic_word_comparison(
     kw_df: pd.DataFrame,
     fuzzy_df: pd.DataFrame,
@@ -532,6 +635,11 @@ def _run_review(assign_path: Path, review_dir: Path, args) -> dict:
 
     n_unclustered = write_unclustered(df, review_dir, sample_unclustered=args.sample_unclustered)
     write_labels_template(overview, review_dir)
+
+    write_consolidated_excel(
+        df, overview, assign_path,
+        out_path=assign_path.parent / "cluster_review_consolidated.xlsx",
+    )
 
     manifest = {
         "assignments": str(assign_path),
