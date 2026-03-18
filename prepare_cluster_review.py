@@ -415,7 +415,6 @@ def write_consolidated_excel(
     assign_path: Path,
     out_path: Path,
     sample_n: int = 20,
-    truncate_chars: int = 120,
 ) -> int:
     """Write cluster_review_consolidated.xlsx — one sheet per cluster, OVERVIEW first.
 
@@ -424,8 +423,7 @@ def write_consolidated_excel(
     ``coherence_rating`` column for the human reviewer.
 
     Sheets are ordered by cluster size descending so the largest topics appear
-    first.  Text is truncated to *truncate_chars* and write_only streaming is
-    used to keep the file as small as possible.
+    first.
 
     Returns the number of cluster sheets written, or 0 if openpyxl is missing.
     """
@@ -504,7 +502,7 @@ def write_consolidated_excel(
             else cluster_docs
         )
         for text in sampled:
-            ws.append([str(text)[:truncate_chars], ""])
+            ws.append([str(text), ""])
 
     wb.save(out_path)
     n = len(sorted_cids)
