@@ -71,6 +71,23 @@ FUZZY_FORMULA_DOCS_PER_CLUSTER = 500   # target docs per cluster
 FUZZY_FORMULA_MIN_CLUSTERS     = 40
 FUZZY_FORMULA_MAX_CLUSTERS     = 200
 FUZZY_FORMULA_GUIDED_FACTOR    = 1.5   # extra headroom per guided topic
+
+
+def get_hdbscan_params(n_docs: int) -> dict:
+    """Compute data-driven HDBSCAN parameters based on corpus size.
+
+    min_cluster_size scales with corpus: smaller corpora need smaller values
+    to allow fine-grained cluster discovery. min_samples = min_cluster_size // 3
+    is a standard heuristic that balances sensitivity and noise robustness.
+
+    Target: allow BERTopic to find roughly n_docs / 400 clusters maximum.
+    min_cluster_size = max(15, min(100, n_docs // 600))
+    """
+    min_cs = max(15, min(100, n_docs // 600))
+    min_s  = max(5,  min(30,  min_cs // 3))
+    return {"min_cluster_size": min_cs, "min_samples": min_s}
+
+
 FUZZY_M = 2.0                # fuzziness exponent (m=2 is standard)
 FUZZY_BATCH_SIZE = 5000      # doc-batch size for TI accumulation and membership prediction
 
@@ -97,9 +114,7 @@ UMAP_N_COMPONENTS = 15
 UMAP_METRIC = "cosine"
 UMAP_RANDOM_STATE = 42
 
-# HDBSCAN
-HDBSCAN_MIN_CLUSTER_SIZE = 100
-HDBSCAN_MIN_SAMPLES = 30
+# HDBSCAN (min_cluster_size and min_samples are now computed per-segment by get_hdbscan_params())
 HDBSCAN_CLUSTER_SELECTION_EPSILON = 0.0
 HDBSCAN_CLUSTER_SELECTION_METHOD = "eom"
 HDBSCAN_CORE_DIST_N_JOBS = 1
@@ -540,7 +555,7 @@ def top_terms_per_cluster(kw_df: pd.DataFrame, top_k: int) -> Dict[int, str]:
     return kw_df.sort_values(["cluster_id", "rank"]).groupby("cluster_id")["term"].apply(lambda s: ", ".join(s.tolist()[:top_k])).to_dict()
 
 
-def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
+def cluster_with_hdbscan(sample_embs: np.ndarray, hdbscan_params: dict) -> np.ndarray:
     um = umap.UMAP(
         n_neighbors=UMAP_N_NEIGHBORS,
         min_dist=UMAP_MIN_DIST,
@@ -551,8 +566,8 @@ def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
     )
     sample_umap = um.fit_transform(sample_embs)
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
-        min_samples=HDBSCAN_MIN_SAMPLES,
+        min_cluster_size=hdbscan_params["min_cluster_size"],
+        min_samples=hdbscan_params["min_samples"],
         cluster_selection_epsilon=HDBSCAN_CLUSTER_SELECTION_EPSILON,
         cluster_selection_method=HDBSCAN_CLUSTER_SELECTION_METHOD,
         metric="euclidean",
@@ -562,12 +577,12 @@ def cluster_with_hdbscan(sample_embs: np.ndarray) -> np.ndarray:
     return clusterer.fit_predict(sample_umap)
 
 
-def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarray, seed_topic_list: List[List[str]]) -> np.ndarray:
+def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarray, seed_topic_list: List[List[str]], hdbscan_params: dict) -> np.ndarray:
     try:
         from bertopic import BERTopic
     except Exception as e:
         warnings.warn(f"BERTopic unavailable ({e}); falling back to UMAP+HDBSCAN")
-        return cluster_with_hdbscan(sample_embs)
+        return cluster_with_hdbscan(sample_embs, hdbscan_params)
 
     um = umap.UMAP(
         n_neighbors=UMAP_N_NEIGHBORS,
@@ -578,8 +593,8 @@ def cluster_with_bertopic_guided(sample_texts: List[str], sample_embs: np.ndarra
         verbose=True,
     )
     hdb = hdbscan.HDBSCAN(
-        min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
-        min_samples=HDBSCAN_MIN_SAMPLES,
+        min_cluster_size=hdbscan_params["min_cluster_size"],
+        min_samples=hdbscan_params["min_samples"],
         cluster_selection_epsilon=HDBSCAN_CLUSTER_SELECTION_EPSILON,
         cluster_selection_method=HDBSCAN_CLUSTER_SELECTION_METHOD,
         metric="euclidean",
@@ -619,7 +634,7 @@ def cluster_with_fuzzy_cmeans(
             "scikit-fuzzy is not installed (pip install scikit-fuzzy). "
             "Falling back to UMAP + HDBSCAN."
         )
-        hdb_labels = cluster_with_hdbscan(sample_embs)
+        hdb_labels = cluster_with_hdbscan(sample_embs, get_hdbscan_params(len(sample_embs)))
         n_c = max(1, int(len(set(hdb_labels[hdb_labels >= 0]))))
         membership = np.zeros((len(hdb_labels), n_c), dtype=np.float32)
         for i, lab in enumerate(hdb_labels):
@@ -971,10 +986,6 @@ def compute_cluster_coherence(
     """
     from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
 
-    # Thresholds used in the printed summary — adjust here as needed
-    TIGHT_THRESHOLD     = 0.70
-    SCATTERED_THRESHOLD = 0.50
-
     rng = np.random.default_rng(random_state)
     valid = out_assign[out_assign["cluster_id"] >= 0]
     results = []
@@ -1011,17 +1022,21 @@ def compute_cluster_coherence(
 
     df_coh = pd.DataFrame(results).sort_values("centroid_sim_mean", ascending=True)
 
-    # Console summary
-    n_scored  = int(df_coh["centroid_sim_mean"].notna().sum())
+    # Console summary — thresholds are percentile-based so the summary is
+    # meaningful regardless of UMAP compression artifacts inflating all sims.
+    valid_scores = df_coh["centroid_sim_mean"].dropna()
+    SCATTERED_THRESHOLD = float(valid_scores.quantile(0.25)) if len(valid_scores) else 0.0
+    TIGHT_THRESHOLD     = float(valid_scores.quantile(0.75)) if len(valid_scores) else 1.0
+
+    n_scored   = int(valid_scores.count())
     mean_intra = df_coh["intra_sim_mean"].mean()
-    tight     = int((df_coh["centroid_sim_mean"] > TIGHT_THRESHOLD).sum())
-    scattered = int((df_coh["centroid_sim_mean"] < SCATTERED_THRESHOLD).sum())
-    seg_label = out_assign.get("segment", pd.Series(["?"])).iloc[0] if "segment" in out_assign.columns else "segment"
+    tight      = int((df_coh["centroid_sim_mean"] > TIGHT_THRESHOLD).sum())
+    scattered  = int((df_coh["centroid_sim_mean"] < SCATTERED_THRESHOLD).sum())
     print(f"Cluster coherence summary:")
     print(f"  Clusters scored: {n_scored}")
     print(f"  Mean intra-cluster similarity: {mean_intra:.3f}" if not np.isnan(mean_intra) else "  Mean intra-cluster similarity: n/a")
-    print(f"  Tight clusters    (centroid_sim_mean > {TIGHT_THRESHOLD}): {tight}")
-    print(f"  Scattered clusters (centroid_sim_mean < {SCATTERED_THRESHOLD}): {scattered}  ← review these")
+    print(f"  Tight clusters     (top quartile,    centroid_sim > {TIGHT_THRESHOLD:.3f}): {tight}")
+    print(f"  Scattered clusters (bottom quartile, centroid_sim < {SCATTERED_THRESHOLD:.3f}): {scattered}  ← review these")
 
     return df_coh
 
@@ -1063,7 +1078,11 @@ def run_one_segment(
         age_vals = sorted(idx_seg["age_group"].dropna().unique().tolist())
         print(f"Segment {seg_name}: age_group values in data = {age_vals}, n={n_total}")
 
-    if n_total < max(HDBSCAN_MIN_CLUSTER_SIZE * 3, 1000):
+    hdbscan_params = get_hdbscan_params(n_total)
+    print(f"[{seg_name}] HDBSCAN params: min_cluster_size={hdbscan_params['min_cluster_size']}, "
+          f"min_samples={hdbscan_params['min_samples']} (n_docs={n_total})")
+
+    if n_total < max(hdbscan_params["min_cluster_size"] * 3, 1000):
         warnings.warn(f"Segment {seg_name} too small; skipping")
         return
 
@@ -1091,7 +1110,7 @@ def run_one_segment(
     if USE_FUZZY_BERTOPIC:
         if USE_BERTOPIC_GUIDED and seed_topic_list:
             # Run guided BERTopic to discover cluster structure
-            guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
+            guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list, hdbscan_params)
             bertopic_count = int(len(set(guided_labels[guided_labels >= 0])))
 
             # Data-driven formula: base on corpus size + guided topic density
@@ -1171,10 +1190,10 @@ def run_one_segment(
                 )
 
     elif USE_BERTOPIC_GUIDED and seed_topic_list:
-        centroid_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list)
+        centroid_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list, hdbscan_params)
         mode = "bertopic_guided"
     else:
-        centroid_labels = cluster_with_hdbscan(sample_embs)
+        centroid_labels = cluster_with_hdbscan(sample_embs, hdbscan_params)
         mode = "umap_hdbscan"
 
     n_clusters = int(len(set(centroid_labels[centroid_labels >= 0])))
@@ -1314,6 +1333,10 @@ def run_one_segment(
         },
         "sampling": sampling_entry,
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
+        "hdbscan": {
+            "min_cluster_size": hdbscan_params["min_cluster_size"],
+            "min_samples": hdbscan_params["min_samples"],
+        },
         "guided_topics_file": str(topics_path),
         "guided_topics_loaded": len(seed_topic_list),
         "guided_topic_labels": seed_labels,
