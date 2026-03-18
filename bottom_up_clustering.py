@@ -1262,10 +1262,6 @@ def main() -> None:
     else:
         print("  No numeric age column — string fallback will be used.")
     print("=" * 60)
-    ans = input("  Continue with clustering? [y/N] ").strip().lower()
-    if ans not in ("y", "yes"):
-        print("[abort] Exiting before clustering. Fix the age join and re-run.")
-        return
     print()
 
     if RUN_SEGMENTED:
