@@ -1208,17 +1208,19 @@ def run_one_segment(
     out_assign["cluster_sim"] = sim_all
     out_assign["cluster_margin"] = margin_all
 
-    # In fuzzy mode, store per-document top-3 membership values as paired
-    # (cluster_id, score) columns.  This is much more useful than the previous
-    # approach of storing globally-dominant cluster columns, which gave near-zero
-    # values for most documents whose primary cluster was not globally dominant.
+    # In fuzzy mode, store per-document top-5 membership values as paired
+    # (cluster_id, score) columns and save the full matrix for later analysis.
     if full_membership is not None:
-        top3_idx = np.argsort(-full_membership, axis=1)[:, :3]   # (n_docs, 3)
-        for rank_i, prefix in enumerate(["fuzzy_top1", "fuzzy_top2", "fuzzy_top3"]):
-            out_assign[f"{prefix}_cluster"] = top3_idx[:, rank_i].astype(np.int32)
+        top5_idx = np.argsort(-full_membership, axis=1)[:, :5]   # (n_docs, 5)
+        for rank_i, prefix in enumerate(["fuzzy_top1", "fuzzy_top2", "fuzzy_top3", "fuzzy_top4", "fuzzy_top5"]):
+            out_assign[f"{prefix}_cluster"] = top5_idx[:, rank_i].astype(np.int32)
             out_assign[f"{prefix}_score"] = full_membership[
-                np.arange(len(full_membership)), top3_idx[:, rank_i]
+                np.arange(len(full_membership)), top5_idx[:, rank_i]
             ].astype(np.float32)
+
+        matrix_path = outdir / "fuzzy_membership_matrix.npz"
+        np.savez_compressed(matrix_path, membership=full_membership.astype(np.float32))
+        print(f"[{seg_name}] full membership matrix saved: shape={full_membership.shape}")
 
     out_assign = normalize_export_dtypes(out_assign)
 
@@ -1330,6 +1332,7 @@ def run_one_segment(
             "clusters_keywords": str(outdir / "clusters_keywords.csv"),
             "clusters_keywords_unigrams": str(outdir / "clusters_keywords_unigrams.csv"),
             "clusters_keywords_bigrams": str(outdir / "clusters_keywords_bigrams.csv"),
+            "fuzzy_membership_matrix": str(outdir / "fuzzy_membership_matrix.npz") if full_membership is not None else None,
         },
         "sampling": sampling_entry,
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
