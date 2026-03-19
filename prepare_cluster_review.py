@@ -497,6 +497,36 @@ def write_consolidated_excel(
     if prevalence_df is None and profiles_df is None:
         print("No fuzzy analysis outputs found — run fuzzy_analysis.py first for enriched OVERVIEW.")
 
+    # ── Load guided topic → cluster mapping ───────────────────────────────────
+    topic_map: dict[int, dict] = {}   # cluster_id → {label, quality, score}
+    raw_topic_map: list = []          # full list, for SEGMENT_SUMMARY
+    map_path = seg_dir / "guided_topic_cluster_map.json"
+    if map_path.exists():
+        try:
+            raw_topic_map = json.loads(map_path.read_text(encoding="utf-8"))
+            for entry in raw_topic_map:
+                cid = entry.get("best_cluster_id")
+                if cid is not None:
+                    cid = int(cid)
+                    if cid not in topic_map:   # first (highest-overlap) match wins
+                        topic_map[cid] = {
+                            "label":   entry["label"],
+                            "quality": entry["match_quality"],
+                            "score":   entry.get("overlap_score", 0.0),
+                        }
+            print(f"Loaded guided topic map: {len(topic_map)} cluster→topic mappings")
+        except Exception as exc:
+            print(f"[warn] Could not load guided_topic_cluster_map.json: {exc}")
+
+    def _sheet_name(cid: int) -> str:
+        if cid in topic_map:
+            label = topic_map[cid]["label"]
+            quality = topic_map[cid]["quality"]
+            short = label[:20] if len(label) > 20 else label
+            suffix = "" if quality == "strong" else "~"
+            return f"{short}{suffix} ({cid})"
+        return f"cluster_{cid}"
+
     # Build per-cluster fuzzy lookup
     fuzzy_by_cid: dict[int, dict] = {}
     if profiles_df is not None:
@@ -613,6 +643,25 @@ def write_consolidated_excel(
         ws_ss.append(["rank", "label_a", "label_b", "cooccurrence_score"])
         for rank, (_, row) in enumerate(cooc_df.head(10).iterrows(), 1):
             ws_ss.append([rank, row.get("label_a", ""), row.get("label_b", ""), _f(row.get("cooccurrence_score"), 4)])
+        ws_ss.append([])
+
+    # Guided topic coverage
+    if raw_topic_map:
+        ws_ss.append(["=== Guided topic coverage ==="])
+        ws_ss.append(["guided_topic", "best_cluster_id", "overlap_score", "match_quality", "note"])
+        seen_clusters: dict[int, str] = {}
+        for entry in raw_topic_map:
+            cid = entry.get("best_cluster_id")
+            label = entry["label"]
+            score = entry.get("overlap_score", 0.0)
+            quality = entry["match_quality"]
+            note = ""
+            if cid is not None:
+                if cid in seen_clusters:
+                    note = f"DUPLICATE — same cluster as {seen_clusters[cid]}"
+                else:
+                    seen_clusters[cid] = label
+            ws_ss.append([label, cid, score, quality, note])
 
     # ── Sheet 2: OVERVIEW ─────────────────────────────────────────────────────
     ws_ov = wb.create_sheet("OVERVIEW")
@@ -620,6 +669,7 @@ def write_consolidated_excel(
         "cluster_id", "size", "centroid_sim_mean", "centroid_sim_std", "intra_sim_mean",
         "top5_unigrams", "top5_bigrams",
         "weighted_prevalence", "pct_active", "multi_topic_rate", "label",
+        "guided_topic_match", "match_quality",
         "review_priority", "coherence_rating",
     ]
     ws_ov.append(overview_header)
@@ -629,6 +679,7 @@ def write_consolidated_excel(
         size = int(size_rows["size"].iloc[0]) if len(size_rows) else 0
         coh = coherence.get(cid, {})
         fz  = fuzzy_by_cid.get(cid, {})
+        tm  = topic_map.get(cid, {})
         ws_ov.append([
             cid,
             size,
@@ -641,6 +692,8 @@ def write_consolidated_excel(
             _f(fz.get("pct_active"), 2),
             _f(fz.get("multi_topic_rate"), 4),
             fz.get("label", ""),
+            tm.get("label", ""),       # guided_topic_match
+            tm.get("quality", ""),     # match_quality
             _priority(cid, size),
             "",  # coherence_rating — filled by reviewer
         ])
@@ -652,7 +705,7 @@ def write_consolidated_excel(
         fz   = fuzzy_by_cid.get(cid, {})
         label = fz.get("label", "")
 
-        ws = wb.create_sheet(f"cluster_{cid}")
+        ws = wb.create_sheet(_sheet_name(cid))
         ws.append([f"cluster_id: {cid}", f"size: {size}", f"label: {label}", ""])
         ws.append(["unigrams (top 10):", ", ".join(uni_kw.get(cid, [])[:10]), "", ""])
         ws.append(["bigrams (top 10):",  ", ".join(bi_kw.get(cid,  [])[:10]), "", ""])

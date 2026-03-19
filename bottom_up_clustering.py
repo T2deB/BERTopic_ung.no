@@ -1041,6 +1041,79 @@ def compute_cluster_coherence(
     return df_coh
 
 
+def map_guided_topics_to_clusters(
+    seed_labels: List[str],
+    seed_topic_list: List[List[str]],
+    kw_uni: pd.DataFrame,
+    top_k_keywords: int = 15,
+) -> List[dict]:
+    """Map each guided topic to its best-matching cluster by keyword overlap.
+
+    For each guided topic, counts how many of its seed keywords appear in
+    each cluster's top unigrams. The cluster with the highest overlap count
+    is considered the best match.
+
+    Returns a list of dicts sorted by guided topic index, each with:
+        label            - guided topic label
+        best_cluster_id  - cluster ID with highest keyword overlap
+        overlap_count    - number of matching keywords
+        overlap_score    - overlap_count / len(seed_keywords) (0.0-1.0)
+        cluster_top_kw   - top keywords of the matched cluster (string)
+        match_quality    - "strong" (>=0.4), "moderate" (>=0.2), "weak" (<0.2)
+    """
+    if kw_uni.empty or not seed_labels:
+        return []
+
+    # Build cluster → top keywords lookup
+    cluster_kw = (
+        kw_uni.sort_values(["cluster_id", "rank"])
+        .groupby("cluster_id")["term"]
+        .apply(lambda s: set(s.tolist()[:top_k_keywords]))
+        .to_dict()
+    )
+
+    results = []
+    for label, keywords in zip(seed_labels, seed_topic_list):
+        if not keywords:
+            results.append({
+                "label": label,
+                "best_cluster_id": None,
+                "overlap_count": 0,
+                "overlap_score": 0.0,
+                "cluster_top_kw": "",
+                "match_quality": "no_keywords",
+            })
+            continue
+
+        seed_set = {k.lower().strip() for k in keywords}
+        best_cid, best_count = -1, 0
+
+        for cid, kw_set in cluster_kw.items():
+            # Check partial matches: seed keyword appears as substring of cluster keyword or vice versa
+            count = sum(
+                1 for sk in seed_set
+                if any(sk in ck or ck in sk for ck in kw_set)
+            )
+            if count > best_count:
+                best_count = count
+                best_cid = cid
+
+        score = best_count / len(seed_set) if seed_set else 0.0
+        top_kw_str = ", ".join(sorted(cluster_kw.get(best_cid, set()))[:8]) if best_cid >= 0 else ""
+        quality = "strong" if score >= 0.4 else ("moderate" if score >= 0.2 else "weak")
+
+        results.append({
+            "label": label,
+            "best_cluster_id": int(best_cid) if best_cid >= 0 else None,
+            "overlap_count": best_count,
+            "overlap_score": round(score, 3),
+            "cluster_top_kw": top_kw_str,
+            "match_quality": quality,
+        })
+
+    return results
+
+
 def run_one_segment(
     seg_name: str,
     outdir: Path,
@@ -1307,6 +1380,21 @@ def run_one_segment(
     )
     catalog_df.to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
 
+    # Guided topic → cluster mapping
+    topic_map: List[dict] = []
+    if seed_labels and seed_topic_list and not kw_uni.empty:
+        topic_map = map_guided_topics_to_clusters(seed_labels, seed_topic_list, kw_uni)
+        topic_map_path = outdir / "guided_topic_cluster_map.json"
+        with open(topic_map_path, "w", encoding="utf-8") as f:
+            json.dump(topic_map, f, ensure_ascii=False, indent=2)
+        strong   = sum(1 for t in topic_map if t["match_quality"] == "strong")
+        moderate = sum(1 for t in topic_map if t["match_quality"] == "moderate")
+        weak     = sum(1 for t in topic_map if t["match_quality"] in ("weak", "no_keywords"))
+        print(f"[{seg_name}] guided topic mapping: {strong} strong, {moderate} moderate, {weak} weak matches")
+        for t in topic_map:
+            if t["match_quality"] in ("weak", "no_keywords"):
+                print(f"  WEAK match: {t['label']} → cluster {t['best_cluster_id']} (score={t['overlap_score']})")
+
     sampling_entry: dict = {
         "size": SAMPLE_SIZE,
         "min_per_stratum": MIN_PER_STRATUM,
@@ -1333,6 +1421,7 @@ def run_one_segment(
             "clusters_keywords_unigrams": str(outdir / "clusters_keywords_unigrams.csv"),
             "clusters_keywords_bigrams": str(outdir / "clusters_keywords_bigrams.csv"),
             "fuzzy_membership_matrix": str(outdir / "fuzzy_membership_matrix.npz") if full_membership is not None else None,
+            "guided_topic_cluster_map": str(outdir / "guided_topic_cluster_map.json") if topic_map else None,
         },
         "sampling": sampling_entry,
         "assign": {"min_sim": ASSIGN_MIN_SIM, "min_margin": ASSIGN_MIN_MARGIN},
