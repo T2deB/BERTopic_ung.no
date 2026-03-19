@@ -416,14 +416,15 @@ def write_consolidated_excel(
     out_path: Path,
     sample_n: int = 20,
 ) -> int:
-    """Write cluster_review_consolidated.xlsx — one sheet per cluster, OVERVIEW first.
+    """Write cluster_review_consolidated.xlsx with SEGMENT_SUMMARY, OVERVIEW, and per-cluster sheets.
 
-    Each cluster sheet has a brief metadata header (size, top-10 unigrams/bigrams)
-    followed by up to *sample_n* randomly sampled questions and an empty
-    ``coherence_rating`` column for the human reviewer.
+    Sheet order:
+      1. SEGMENT_SUMMARY  — high-level corpus stats, top topics, top co-occurrences
+      2. OVERVIEW         — one row per cluster, sorted by centroid_sim_mean ascending
+      3. cluster_N        — up to sample_n sampled questions per cluster
 
-    Sheets are ordered by cluster size descending so the largest topics appear
-    first.
+    OVERVIEW columns include fuzzy analysis enrichment (weighted_prevalence, pct_active,
+    multi_topic_rate, label) and a review_priority column (HIGH / MEDIUM / LOW).
 
     Returns the number of cluster sheets written, or 0 if openpyxl is missing.
     """
@@ -434,14 +435,16 @@ def write_consolidated_excel(
               "(pip install openpyxl)")
         return 0
 
-    # Load unigram / bigram keyword files
+    seg_dir = assign_path.parent
+
+    # ── Load keyword files ────────────────────────────────────────────────────
     uni_kw: dict[int, list[str]] = {}
     bi_kw:  dict[int, list[str]] = {}
     for fname, dest in [
         ("clusters_keywords_unigrams.csv", uni_kw),
         ("clusters_keywords_bigrams.csv",  bi_kw),
     ]:
-        fpath = assign_path.parent / fname
+        fpath = seg_dir / fname
         if fpath.exists():
             try:
                 kdf = pd.read_csv(fpath)
@@ -450,9 +453,9 @@ def write_consolidated_excel(
             except Exception:
                 pass
 
-    # Load coherence scores if available
+    # ── Load coherence scores ─────────────────────────────────────────────────
     coherence: dict[int, dict] = {}
-    coh_path = assign_path.parent / "cluster_coherence_scores.csv"
+    coh_path = seg_dir / "cluster_coherence_scores.csv"
     if coh_path.exists():
         try:
             coh_df = pd.read_csv(coh_path)
@@ -465,62 +468,195 @@ def write_consolidated_excel(
         except Exception:
             pass
 
+    # ── Load fuzzy analysis outputs ───────────────────────────────────────────
+    prevalence_df = None
+    profiles_df   = None
+    cooc_df       = None
+    for attr, fname in [
+        ("prevalence_df", "fuzzy_theme_prevalence.csv"),
+        ("profiles_df",   "fuzzy_topic_profiles.csv"),
+        ("cooc_df",       "fuzzy_cooccurrence.csv"),
+    ]:
+        fpath = seg_dir / fname
+        if fpath.exists():
+            try:
+                locals()[attr]   # just to reference; assign below
+            except Exception:
+                pass
+        if fpath.exists():
+            try:
+                if attr == "prevalence_df":
+                    prevalence_df = pd.read_csv(fpath)
+                elif attr == "profiles_df":
+                    profiles_df = pd.read_csv(fpath)
+                elif attr == "cooc_df":
+                    cooc_df = pd.read_csv(fpath)
+            except Exception:
+                pass
+
+    if prevalence_df is None and profiles_df is None:
+        print("No fuzzy analysis outputs found — run fuzzy_analysis.py first for enriched OVERVIEW.")
+
+    # Build per-cluster fuzzy lookup
+    fuzzy_by_cid: dict[int, dict] = {}
+    if profiles_df is not None:
+        for _, row in profiles_df.iterrows():
+            cid = int(row["cluster_id"])
+            fuzzy_by_cid[cid] = {
+                "label":            row.get("label", f"cluster_{cid}"),
+                "pct_active":       row.get("pct_active"),
+                "multi_topic_rate": row.get("multi_topic_rate"),
+                "weighted_prevalence": None,
+            }
+    if prevalence_df is not None:
+        for _, row in prevalence_df.iterrows():
+            cid = int(row["cluster_id"])
+            if cid not in fuzzy_by_cid:
+                fuzzy_by_cid[cid] = {"label": f"cluster_{cid}", "pct_active": None,
+                                     "multi_topic_rate": None, "weighted_prevalence": None}
+            fuzzy_by_cid[cid]["weighted_prevalence"] = row.get("weighted_prevalence")
+
     clustered = df[df["cluster_id"] >= 0].copy()
 
-    # Sheet order: sort by centroid_sim_mean ascending (scattered first) when available,
-    # otherwise fall back to size descending
+    # ── Sort order: centroid_sim_mean ascending (scattered first) ─────────────
+    all_cids = (
+        overview["cluster_id"].astype(int).tolist()
+        if "cluster_id" in overview.columns
+        else list(clustered["cluster_id"].unique())
+    )
     if coherence:
         def _sort_key(cid: int):
             v = coherence.get(cid, {}).get("centroid_sim_mean")
             return (1, float("inf")) if v is None or (isinstance(v, float) and np.isnan(v)) else (0, v)
-        all_cids = overview["cluster_id"].astype(int).tolist() if "cluster_id" in overview.columns else list(clustered["cluster_id"].unique())
         sorted_cids = sorted(all_cids, key=_sort_key)
     elif "size" in overview.columns:
         sorted_cids = overview.sort_values("size", ascending=False)["cluster_id"].astype(int).tolist()
     else:
         sorted_cids = clustered["cluster_id"].value_counts().index.tolist()
 
-    overview_header =["cluster_id", "size", "centroid_sim_mean", "centroid_sim_std", "intra_sim_mean",
-                       "top5_unigrams", "top5_bigrams", "coherence_rating"]
+    # ── Compute review_priority (after sort, before writing) ─────────────────
+    valid_coh_vals = [
+        coherence[c]["centroid_sim_mean"] for c in sorted_cids
+        if c in coherence and coherence[c].get("centroid_sim_mean") is not None
+        and not (isinstance(coherence[c]["centroid_sim_mean"], float) and np.isnan(coherence[c]["centroid_sim_mean"]))
+    ]
+    q25 = float(np.percentile(valid_coh_vals, 25)) if valid_coh_vals else None
+    q50 = float(np.percentile(valid_coh_vals, 50)) if valid_coh_vals else None
+
+    def _priority(cid: int, size: int) -> str:
+        if q25 is None:
+            return "MEDIUM"
+        v = coherence.get(cid, {}).get("centroid_sim_mean")
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "MEDIUM"
+        mt = fuzzy_by_cid.get(cid, {}).get("multi_topic_rate")
+        in_bottom = v < q25
+        in_top_half = q50 is not None and v >= q50
+        if in_bottom and size > 200:
+            return "HIGH"
+        if in_bottom:
+            return "MEDIUM"
+        if mt is not None and not (isinstance(mt, float) and np.isnan(mt)) and mt > 0.7:
+            return "MEDIUM"
+        if in_top_half:
+            return "LOW"
+        return "MEDIUM"
+
+    # Helper to safely format a float cell
+    def _f(v, digits=4):
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+            return None if np.isnan(fv) else round(fv, digits)
+        except (TypeError, ValueError):
+            return None
 
     wb = Workbook(write_only=True)
 
-    # ── OVERVIEW sheet ────────────────────────────────────────────────────────
+    # ── Sheet 1: SEGMENT_SUMMARY ──────────────────────────────────────────────
+    ws_ss = wb.create_sheet("SEGMENT_SUMMARY")
+    n_total   = len(df)
+    n_assigned = int((df["cluster_id"] >= 0).sum()) if "cluster_id" in df.columns else 0
+    assign_rate = round(n_assigned / n_total * 100, 1) if n_total else 0.0
+
+    ws_ss.append(["=== Corpus overview ==="])
+    ws_ss.append(["total_questions", n_total])
+    ws_ss.append(["assigned_questions", n_assigned])
+    ws_ss.append(["assignment_rate_pct", assign_rate])
+    ws_ss.append(["n_clusters", len(sorted_cids)])
+    ws_ss.append([])
+
+    # Coherence summary
+    if valid_coh_vals:
+        ws_ss.append(["=== Coherence summary ==="])
+        ws_ss.append(["mean_centroid_sim", round(float(np.mean(valid_coh_vals)), 4)])
+        ws_ss.append(["min_centroid_sim",  round(float(np.min(valid_coh_vals)),  4)])
+        ws_ss.append(["max_centroid_sim",  round(float(np.max(valid_coh_vals)),  4)])
+        high_count = sum(1 for c in sorted_cids if _priority(
+            c, int(overview.loc[overview["cluster_id"] == c, "size"].iloc[0])
+            if len(overview[overview["cluster_id"] == c]) else 0) == "HIGH")
+        ws_ss.append(["HIGH_priority_clusters", high_count])
+        ws_ss.append([])
+
+    # Top 10 topics by weighted prevalence
+    if prevalence_df is not None:
+        ws_ss.append(["=== Top 10 topics by weighted prevalence ==="])
+        ws_ss.append(["rank", "cluster_id", "label", "weighted_prevalence"])
+        for rank, (_, row) in enumerate(prevalence_df.head(10).iterrows(), 1):
+            ws_ss.append([rank, int(row["cluster_id"]), row.get("label", ""), _f(row.get("weighted_prevalence"), 4)])
+        ws_ss.append([])
+
+    # Top 10 co-occurring pairs
+    if cooc_df is not None and not cooc_df.empty:
+        ws_ss.append(["=== Top 10 co-occurring topic pairs ==="])
+        ws_ss.append(["rank", "label_a", "label_b", "cooccurrence_score"])
+        for rank, (_, row) in enumerate(cooc_df.head(10).iterrows(), 1):
+            ws_ss.append([rank, row.get("label_a", ""), row.get("label_b", ""), _f(row.get("cooccurrence_score"), 4)])
+
+    # ── Sheet 2: OVERVIEW ─────────────────────────────────────────────────────
     ws_ov = wb.create_sheet("OVERVIEW")
+    overview_header = [
+        "cluster_id", "size", "centroid_sim_mean", "centroid_sim_std", "intra_sim_mean",
+        "top5_unigrams", "top5_bigrams",
+        "weighted_prevalence", "pct_active", "multi_topic_rate", "label",
+        "review_priority", "coherence_rating",
+    ]
     ws_ov.append(overview_header)
+
     for cid in sorted_cids:
         size_rows = overview[overview["cluster_id"] == cid]
         size = int(size_rows["size"].iloc[0]) if len(size_rows) else 0
         coh = coherence.get(cid, {})
+        fz  = fuzzy_by_cid.get(cid, {})
         ws_ov.append([
             cid,
             size,
-            coh.get("centroid_sim_mean"),
-            coh.get("centroid_sim_std"),
-            coh.get("intra_sim_mean"),
+            _f(coh.get("centroid_sim_mean")),
+            _f(coh.get("centroid_sim_std")),
+            _f(coh.get("intra_sim_mean")),
             ", ".join(uni_kw.get(cid, [])[:5]),
             ", ".join(bi_kw.get(cid,  [])[:5]),
-            "",
+            _f(fz.get("weighted_prevalence"), 6),
+            _f(fz.get("pct_active"), 2),
+            _f(fz.get("multi_topic_rate"), 4),
+            fz.get("label", ""),
+            _priority(cid, size),
+            "",  # coherence_rating — filled by reviewer
         ])
 
-    # ── One sheet per cluster ─────────────────────────────────────────────────
+    # ── Sheets 3+: one per cluster ────────────────────────────────────────────
     for cid in sorted_cids:
         size_rows = overview[overview["cluster_id"] == cid]
         size = int(size_rows["size"].iloc[0]) if len(size_rows) else 0
+        fz   = fuzzy_by_cid.get(cid, {})
+        label = fz.get("label", "")
 
         ws = wb.create_sheet(f"cluster_{cid}")
-        ws.append([f"cluster_id: {cid}", f"size: {size}", "", ""])
-        ws.append([
-            "unigrams (top 10):",
-            ", ".join(uni_kw.get(cid, [])[:10]),
-            "", "",
-        ])
-        ws.append([
-            "bigrams (top 10):",
-            ", ".join(bi_kw.get(cid, [])[:10]),
-            "", "",
-        ])
-        ws.append([])                               # blank separator
+        ws.append([f"cluster_id: {cid}", f"size: {size}", f"label: {label}", ""])
+        ws.append(["unigrams (top 10):", ", ".join(uni_kw.get(cid, [])[:10]), "", ""])
+        ws.append(["bigrams (top 10):",  ", ".join(bi_kw.get(cid,  [])[:10]), "", ""])
+        ws.append([])
         ws.append(["question_sample", "coherence_rating"])
 
         cluster_docs = clustered[clustered["cluster_id"] == cid]["body_norm"]
@@ -610,7 +746,7 @@ def _run_review(assign_path: Path, review_dir: Path, args) -> dict:
     if has_fuzzy and args.skip_fuzzy:
         print("[mode] fuzzy columns detected but --skip-fuzzy was set; running in standard mode")
     elif is_fuzzy:
-        print("[mode] fuzzy BERTopic detected (fuzzy_top1/2/3_cluster+score); fuzzy outputs → fuzzy/")
+        print("[mode] fuzzy BERTopic detected (fuzzy_top1..5_cluster+score); fuzzy outputs → fuzzy/")
     else:
         print("[mode] standard (no fuzzy_membership_* columns found)")
 
