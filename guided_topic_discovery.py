@@ -262,8 +262,9 @@ def compute_ctfidf_bigrams(
     if n < 10:
         return []
 
-    cleaned = [_clean_text(t) for t in texts]
-    doc_bigrams = [_tokenize_bigrams(t) for t in cleaned]
+    # Texts are expected to already be cleaned by the caller (discover_category).
+    # If called directly with raw texts, clean here as fallback.
+    doc_bigrams = [_tokenize_bigrams(t) for t in texts]
 
     min_df = max(2, int(n * min_freq * 0.5))
     doc_freq: Counter = Counter()
@@ -336,26 +337,25 @@ def discover_category(
 ) -> List[Dict]:
     """
     Run n_passes of iterative residual c-TF-IDF on texts.
-
-    Returns list of pass results, each with:
-        pass_num        int
-        n_questions     int   — questions in this pass
-        pct_remaining   float — fraction of original questions remaining
-        bigrams         list of (bigram, score, freq_pct)
-        removed_bigrams list of bigrams used for removal (top TOP_BIGRAMS_REMOVE)
+    Texts are cleaned once upfront so bigram detection and removal
+    operate on identical text — fixing the mismatch where bigrams
+    were computed on cleaned text but removal searched raw text.
     """
-    remaining = list(range(len(texts)))
+    # Clean once upfront — both scoring and removal use the same cleaned texts
+    cleaned_texts = [_clean_text(t) for t in texts]
+
+    remaining = list(range(len(cleaned_texts)))
     results = []
 
     for pass_num in range(1, n_passes + 1):
         n_remaining = len(remaining)
-        pct_remaining = n_remaining / len(texts)
+        pct_remaining = n_remaining / len(cleaned_texts)
 
         if n_remaining < MIN_QUESTIONS:
             print(f"    Pass {pass_num}: stopping — only {n_remaining} questions left")
             break
 
-        pass_texts = [texts[i] for i in remaining]
+        pass_texts = [cleaned_texts[i] for i in remaining]
         bigrams = compute_ctfidf_bigrams(pass_texts, top_k=TOP_BIGRAMS_SHOWN)
 
         if not bigrams:
@@ -376,12 +376,14 @@ def discover_category(
         for bigram, score, freq in bigrams[:TOP_BIGRAMS_SHOWN]:
             print(f"      {bigram:<35} {freq*100:>5.1f}% of questions")
 
+        # Remove questions containing the top bigrams — using cleaned texts
         remove_mask = questions_containing_bigrams(pass_texts, remove_bigrams)
         n_removed = int(remove_mask.sum())
         keep_local = np.where(~remove_mask)[0]
         remaining = [remaining[i] for i in keep_local]
 
-        print(f"      → removed {n_removed:,} questions containing: {', '.join(remove_bigrams)}")
+        print(f"      → removed {n_removed:,} questions containing: "
+              f"{', '.join(remove_bigrams)}")
         print()
 
     return results
