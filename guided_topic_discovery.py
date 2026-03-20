@@ -35,6 +35,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
@@ -497,8 +498,8 @@ def _write_excel_report(
         # Column widths
         for p_idx in range(len(passes)):
             col = p_idx * 2 + 1
-            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width     = 32
-            ws.column_dimensions[ws.cell(row=1, column=col + 1).column_letter].width = 14
+            ws.column_dimensions[get_column_letter(col)].width     = 32
+            ws.column_dimensions[get_column_letter(col + 1)].width = 14
 
         ws.freeze_panes = ws.cell(row=4, column=1)
 
