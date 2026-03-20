@@ -25,12 +25,12 @@ import argparse
 import json
 import re
 import warnings
+from collections import Counter
 from pathlib import Path
 from typing import List, Tuple, Dict
 
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import CountVectorizer
 
 try:
     from openpyxl import Workbook
@@ -42,8 +42,8 @@ except ImportError:
     print("WARNING: openpyxl not installed — Excel output will be skipped. pip install openpyxl")
 
 try:
-    from nltk.corpus import stopwords
-    NLTK_STOP = set(stopwords.words("norwegian"))
+    from nltk.corpus import stopwords as _nltk_stop
+    NLTK_STOP = set(_nltk_stop.words("norwegian"))
 except Exception:
     NLTK_STOP = set()
 
@@ -60,18 +60,32 @@ TOP_BIGRAMS_REMOVE = 3     # top bigrams from each pass to remove for next pass
 MIN_BIGRAM_FREQ    = 0.02  # minimum fraction of questions a bigram must appear in
 MIN_QUESTIONS      = 50    # minimum questions remaining to continue passes
 
+# Matches R script's custom_stop
 CUSTOM_STOP = {
-    "hei", "heisann", "hallo", "halloi", "pls", "plis", "please", "takk",
-    "veldig", "ganske", "litt", "mye", "egentlig", "faktisk", "kanskje",
-    "liksom", "bare", "helt", "noe", "noen", "gang", "år", "dag", "uke",
-    "hva", "hvordan", "hvorfor", "hvem", "hvor", "når", "fordi", "men",
-    "også", "derfor", "altså", "så", "om", "jeg", "meg", "min", "mitt",
-    "mine", "vi", "oss", "vår", "du", "deg", "din", "han", "hun", "de",
-    "dem", "man", "en", "den", "det", "dette", "disse", "slik", "sånn",
-    "må", "kan", "skal", "vil", "bør", "gjør", "gjøre", "får", "går",
-    "kommer", "tar", "ta", "tok", "føler", "vet", "hatt", "har", "hadde",
-    "blir", "bli", "ble", "vært", "er", "var", "andre", "mange", "type",
+    "hei", "hallo", "takk", "hilsen",
+    "jeg", "du", "vi", "dere", "han", "hun", "de", "den", "det", "dette",
+    "ikke", "bare", "litt", "veldig", "også", "så", "å",
+    "må", "kan", "vil", "skal", "burde",
+    "er", "var", "blir", "ble", "har", "hadde",
+    "som", "til", "for", "på", "av", "i", "om", "fra", "med", "uten",
+    "når", "hva", "hvordan", "hvor", "hvorfor",
 }
+
+# Extra stopwords for bigrams only — matches R script's glue_words
+# Prevents meaningless bigrams like "følelser for", "snakke om"
+GLUE_WORDS = {
+    "for", "om", "til", "at", "som", "å", "med", "uten", "hos", "fra",
+    "på", "av", "i", "den", "det", "de", "dette", "da", "nå", "så",
+    "jeg", "du", "vi", "han", "hun",
+    "er", "var", "blir", "ble", "har", "hadde",
+    "ikke", "bare", "veldig", "litt",
+}
+
+# Bigrams to always exclude — matches R script's ban_bigrams
+BAN_BIGRAMS = {
+    "hele tiden", "hele tatt", "flere ganger", "lang tid", "svar fort",
+}
+
 STOP_WORDS = sorted(NLTK_STOP | CUSTOM_STOP)
 
 
@@ -185,63 +199,95 @@ def join_topic_to_assignments(assign: pd.DataFrame, data_dir: Path) -> pd.DataFr
 
 # ── c-TF-IDF ────────────────────────────────────────────────────────────────
 
+def _clean_text(text: str) -> str:
+    """Match R script clean_text: lowercase, strip URLs, numbers, punctuation."""
+    text = text.lower()
+    text = re.sub(r'http\S+|www\S+', ' ', text)
+    text = re.sub(r'[0-9]+', ' ', text)
+    text = re.sub(r'[^\w\sæøå]', ' ', text)   # keep letters incl Norwegian
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _tokenize_bigrams(text: str) -> List[str]:
+    """
+    Tokenize into bigrams matching R script logic:
+    - both words length >= 3
+    - neither word in STOP_WORDS or GLUE_WORDS
+    - result bigram not in BAN_BIGRAMS
+    """
+    words = text.split()
+    words = [w for w in words if len(w) >= 3]
+    bigrams = []
+    for i in range(len(words) - 1):
+        w1, w2 = words[i], words[i + 1]
+        if (w1 not in STOP_WORDS and w2 not in STOP_WORDS
+                and w1 not in GLUE_WORDS and w2 not in GLUE_WORDS):
+            bg = f"{w1} {w2}"
+            if bg not in BAN_BIGRAMS:
+                bigrams.append(bg)
+    return bigrams
+
+
 def compute_ctfidf_bigrams(
     texts: List[str],
     top_k: int = TOP_BIGRAMS_SHOWN,
     min_freq: float = MIN_BIGRAM_FREQ,
 ) -> List[Tuple[str, float, float]]:
     """
-    Compute c-TF-IDF for bigrams on a single group of texts.
+    Compute c-TF-IDF for bigrams.
+    Text cleaning matches R script: lowercase, strip URLs/numbers/punctuation.
+    Bigram filtering matches R script: glue_words removed, ban_bigrams excluded.
 
-    Returns list of (bigram, ctfidf_score, freq_pct) tuples,
-    where freq_pct = fraction of questions containing that bigram.
-    Only returns bigrams appearing in at least min_freq of questions.
+    Returns list of (bigram, ctfidf_score, freq_pct).
+    Only returns bigrams appearing in >= min_freq of questions.
     """
     n = len(texts)
     if n < 10:
         return []
 
-    vect = CountVectorizer(
-        ngram_range=(2, 2),
-        min_df=max(2, int(n * min_freq * 0.5)),
-        max_df=0.95,
-        stop_words=STOP_WORDS,
-        lowercase=True,
-        token_pattern=r"(?u)\b[a-zæøå]{3,}\b",
-        strip_accents=None,
-    )
-    try:
-        X = vect.fit_transform(texts)
-    except ValueError:
-        return []
+    cleaned = [_clean_text(t) for t in texts]
+    doc_bigrams = [_tokenize_bigrams(t) for t in cleaned]
 
-    vocab = vect.get_feature_names_out()
-    if len(vocab) == 0:
-        return []
+    min_df = max(2, int(n * min_freq * 0.5))
+    doc_freq: Counter = Counter()
+    for bg_list in doc_bigrams:
+        for bg in set(bg_list):
+            doc_freq[bg] += 1
 
-    # Aggregate into one "cluster" document for c-TF-IDF
-    tf_agg = X.sum(axis=0).A1
+    vocab = [bg for bg, df in doc_freq.items() if df >= min_df]
+    if not vocab:
+        return []
+    vocab_idx = {bg: i for i, bg in enumerate(vocab)}
+    V = len(vocab)
+
+    tf_agg   = np.zeros(V, dtype=np.float64)
+    doc_flag = np.zeros(V, dtype=np.float64)
+    for bg_list in doc_bigrams:
+        seen: set = set()
+        for bg in bg_list:
+            if bg in vocab_idx:
+                tf_agg[vocab_idx[bg]] += 1
+                if bg not in seen:
+                    doc_flag[vocab_idx[bg]] += 1
+                    seen.add(bg)
+
     total = tf_agg.sum()
     if total == 0:
         return []
     tf_norm = tf_agg / total
 
-    # IDF
-    df_counts = (X > 0).sum(axis=0).A1
-    idf = np.log((n + 1) / (1 + df_counts)) + 1.0
+    idf = np.log((n + 1) / (1 + doc_flag)) + 1.0
     scores = tf_norm * idf
+    freq   = doc_flag / n
 
-    # Frequency: fraction of questions containing each bigram
-    freq = df_counts / n
-
-    # Filter by minimum frequency
     mask = freq >= min_freq
     if not mask.any():
         return []
 
     filtered_scores = scores * mask
-    top_idx = np.argsort(-filtered_scores)[:top_k]
-    top_idx = [i for i in top_idx if mask[i]]
+    top_idx = np.argsort(-filtered_scores)[:top_k * 2]
+    top_idx = [i for i in top_idx if mask[i]][:top_k]
 
     return [(vocab[i], float(scores[i]), float(freq[i])) for i in top_idx]
 
@@ -443,7 +489,10 @@ def _write_excel_report(
         if not passes:
             continue
 
-        ws = wb.create_sheet(title=cat[:31])
+        # Excel sheet names cannot contain: / \ ? * [ ] :
+        _INVALID = r'[/\\?*\[\]:]'
+        sheet_name = re.sub(_INVALID, '-', cat).strip()[:31]
+        ws = wb.create_sheet(title=sheet_name)
 
         # Category title spanning all columns
         ws.merge_cells(start_row=1, start_column=1,
