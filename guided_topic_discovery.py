@@ -311,20 +311,21 @@ def compute_ctfidf_bigrams(
 
 def questions_containing_bigrams(texts: List[str], bigrams: List[str]) -> np.ndarray:
     """
-    Returns boolean array: True for each question containing
-    at least one of the given bigrams.
+    Returns boolean array: True for each question whose token bigram list
+    contains at least one of the given bigrams.
+
+    Uses _tokenize_bigrams (same as scoring) so that short connector words
+    like 'og', 'i' are filtered before adjacency is checked.
+    This means 'mamma og pappa' correctly matches the bigram 'mamma pappa'
+    because tokenization skips 'og' (< 3 chars) making 'mamma' and 'pappa'
+    adjacent in the token list.
     """
+    bigram_set = set(bigrams)
     mask = np.zeros(len(texts), dtype=bool)
-    for bigram in bigrams:
-        words = bigram.split()
-        if len(words) == 2:
-            pattern = re.compile(
-                r'\b' + re.escape(words[0]) + r'\s+' + re.escape(words[1]) + r'\b',
-                re.IGNORECASE,
-            )
-            for i, t in enumerate(texts):
-                if pattern.search(t):
-                    mask[i] = True
+    for i, text in enumerate(texts):
+        doc_bigrams = _tokenize_bigrams(text)
+        if any(bg in bigram_set for bg in doc_bigrams):
+            mask[i] = True
     return mask
 
 
