@@ -163,10 +163,21 @@ def build_topic_lookup(data_dir: Path) -> pd.DataFrame:
 
     raw = pd.concat(parts, ignore_index=True)
     raw["body_key"] = _norm_body(raw[text_col])
+
+    # Split comma-separated topics into separate rows (matches R separate_rows)
+    # e.g. "Sex, Kropp" becomes two rows: one for "Sex", one for "Kropp"
+    raw["topic"] = raw["topic"].astype(str).str.split(",")
+    raw = raw.explode("topic")
+    raw["topic"] = raw["topic"].str.strip()
+    raw = raw[raw["topic"].str.len() > 0]
+    raw = raw[raw["topic"] != "-"]
+    raw = raw[raw["topic"] != "nan"]
+
+    # Keep all (body_key, topic) pairs — one question can appear in multiple categories
     lookup = (
         raw[["body_key", "topic"]]
         .dropna(subset=["body_key", "topic"])
-        .drop_duplicates(subset=["body_key"])
+        .drop_duplicates(subset=["body_key", "topic"])
     )
     print(f"[topic] lookup built: {len(lookup):,} rows from {len(parts)} files")
     print(f"[topic] categories found: {sorted(lookup['topic'].unique().tolist())}")
@@ -183,18 +194,23 @@ def join_topic_to_assignments(assign: pd.DataFrame, data_dir: Path) -> pd.DataFr
         return assign
 
     body_keys = _norm_body(assign["body_norm"])
-    joined_topic = (
-        pd.DataFrame({"body_key": body_keys.values})
-        .merge(lookup, on="body_key", how="left")["topic"]
-    )
     assign = assign.copy()
-    assign["topic"] = joined_topic.values
-    coverage = assign["topic"].notna().mean()
-    print(f"[topic] join coverage: {coverage:.1%} ({assign['topic'].notna().sum():,} / {len(assign):,} questions)")
+    assign["body_key"] = body_keys.values
+
+    # Merge — a question with multiple topics produces multiple rows
+    assign_expanded = assign.merge(lookup, on="body_key", how="left")
+    assign_expanded["topic"] = assign_expanded["topic"].fillna("unknown")
+
+    coverage = (assign_expanded["topic"] != "unknown").mean()
+    print(f"[topic] join coverage: {coverage:.1%}")
+    print(f"[topic] questions after expansion: {len(assign_expanded):,} "
+          f"(was {len(assign):,} — {len(assign_expanded)-len(assign):,} extra rows from multi-category questions)")
     print(f"[topic] category distribution:")
-    for cat, cnt in assign["topic"].value_counts().items():
-        print(f"         {cat:<30} {cnt:>6,} ({cnt/len(assign)*100:.1f}%)")
-    return assign
+    for cat, cnt in assign_expanded["topic"].value_counts().items():
+        print(f"         {cat:<35} {cnt:>6,}")
+
+    assign_expanded = assign_expanded.drop(columns=["body_key"])
+    return assign_expanded
 
 
 # ── c-TF-IDF ────────────────────────────────────────────────────────────────
