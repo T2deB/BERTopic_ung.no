@@ -56,8 +56,12 @@ SEGMENTS       = ["boys_13_15", "boys_16_20", "girls_13_15", "girls_16_20"]
 # Discovery settings
 N_PASSES           = 5     # number of iterative passes per category
 TOP_BIGRAMS_SHOWN  = 10    # bigrams to display per pass
-TOP_BIGRAMS_REMOVE = 3     # top bigrams from each pass to remove for next pass
-MIN_BIGRAM_FREQ    = 0.02  # minimum fraction of questions a bigram must appear in
+TOP_BIGRAMS_REMOVE = 3     # top TF-IDF bigrams shown as pass label
+TOP_FREQ_REMOVE    = 5     # top FREQUENCY bigrams used for actual removal
+MIN_BIGRAM_FREQ    = 0.005  # minimum fraction of questions (0.5%) — closer to R's n>=5
+MIN_BIGRAM_ABS     = 5      # absolute minimum for both display and removal
+# Note: no relative threshold for removal — absolute count scales across
+# categories of all sizes. A 5-question floor works for 500 or 50,000 questions.
 MIN_QUESTIONS      = 50    # minimum questions remaining to continue passes
 
 # Matches R script's custom_stop
@@ -83,7 +87,7 @@ GLUE_WORDS = {
 
 # Bigrams to always exclude — matches R script's ban_bigrams
 BAN_BIGRAMS = {
-    "hele tiden", "hele tatt", "flere ganger", "lang tid", "svar fort",
+    "hele tiden", "hele tatt", "flere ganger", "lang tid", "svar fort", "gammel jente", "gammel gutt",
 }
 
 STOP_WORDS = sorted(NLTK_STOP | CUSTOM_STOP)
@@ -298,7 +302,8 @@ def compute_ctfidf_bigrams(
     scores = tf_norm * idf
     freq   = doc_flag / n
 
-    mask = freq >= min_freq
+    abs_counts = doc_flag  # already computed above
+    mask = (freq >= min_freq) & (abs_counts >= MIN_BIGRAM_ABS)
     if not mask.any():
         return []
 
@@ -330,6 +335,277 @@ def questions_containing_bigrams(texts: List[str], bigrams: List[str]) -> np.nda
 
 
 # ── Main discovery loop ──────────────────────────────────────────────────────
+
+def compute_ctfidf_bigrams_cross_category(
+    category_texts: Dict[str, List[str]],
+    top_k: int = TOP_BIGRAMS_SHOWN,
+    min_freq: float = MIN_BIGRAM_FREQ,
+) -> Dict[str, List[Tuple[str, float, float]]]:
+    """
+    Cross-category c-TF-IDF for bigrams.
+    Treats each category as a document (matches R's bind_tf_idf approach).
+    IDF = log((n_cats + 1) / (n_cats_containing_bigram + 1)) + 1 —
+    bigrams appearing in many categories score lower, highlighting
+    what is distinctive to each category.
+
+    Args:
+        category_texts: dict mapping category name -> list of pre-cleaned texts
+        top_k:          top bigrams to return per category
+        min_freq:       minimum fraction of a category's questions that must
+                        contain the bigram (applied after IDF weighting)
+
+    Returns:
+        dict mapping category name -> list of (bigram, ctfidf_score, freq_pct)
+    """
+    cats = list(category_texts.keys())
+    n_cats = len(cats)
+    if n_cats == 0:
+        return {}
+
+    # Per-category bigram counts
+    cat_tf: Dict[str, Counter] = {}        # bigram -> total occurrences in category
+    cat_doc_flag: Dict[str, Counter] = {}  # bigram -> n questions containing bigram
+    cat_n: Dict[str, int] = {}
+
+    for cat, texts in category_texts.items():
+        cat_n[cat] = len(texts)
+        tf_c: Counter = Counter()
+        flag_c: Counter = Counter()
+        for text in texts:
+            bgs = _tokenize_bigrams(text)
+            for bg in bgs:
+                tf_c[bg] += 1
+            for bg in set(bgs):
+                flag_c[bg] += 1
+        cat_tf[cat] = tf_c
+        cat_doc_flag[cat] = flag_c
+
+    # Cross-category document frequency: how many categories contain each bigram
+    cross_doc_freq: Counter = Counter()
+    for cat in cats:
+        for bg in cat_doc_flag[cat]:
+            cross_doc_freq[bg] += 1
+
+    results: Dict[str, List[Tuple[str, float, float]]] = {}
+
+    for cat in cats:
+        n = cat_n[cat]
+        if n < 10:
+            results[cat] = []
+            continue
+
+        tf_counter   = cat_tf[cat]
+        flag_counter = cat_doc_flag[cat]
+        min_df = max(2, int(n * min_freq * 0.5))
+        vocab  = [bg for bg, df in flag_counter.items() if df >= min_df]
+        if not vocab:
+            results[cat] = []
+            continue
+
+        total_tf = sum(tf_counter[bg] for bg in vocab)
+        if total_tf == 0:
+            results[cat] = []
+            continue
+
+        scored = []
+        for bg in vocab:
+            tf   = tf_counter[bg] / total_tf
+            # Match R's bind_tf_idf: log(n_docs / df)
+            # Bigrams appearing in ALL categories get idf=0 → score=0
+            # This prevents generic cross-category bigrams like "mamma pappa"
+            # from appearing in category-specific results
+            df = cross_doc_freq[bg]
+            idf = np.log(n_cats / df) if df < n_cats else 0.0
+            freq  = flag_counter[bg] / n
+            n_q   = flag_counter[bg]  # raw question count
+            score = tf * idf
+            n_q = flag_counter[bg]
+            if freq >= min_freq and n_q >= MIN_BIGRAM_ABS and score > 0:
+                scored.append((bg, float(score), float(freq), int(n_q)))
+
+        scored.sort(key=lambda x: -x[1])
+        results[cat] = scored[:top_k]
+
+    return results
+
+
+def get_top_freq_bigrams(
+    texts: List[str],
+    top_k: int = TOP_FREQ_REMOVE,
+) -> List[Tuple[str, float, int]]:
+    """
+    Get the most FREQUENT bigrams in texts regardless of TF-IDF score.
+    Used for removal so each pass covers maximum questions.
+    Returns list of (bigram, freq_pct, n_questions) sorted by frequency desc.
+    """
+    n = len(texts)
+    if n < 10:
+        return []
+
+    doc_freq: Counter = Counter()
+    for text in texts:
+        bgs = _tokenize_bigrams(text)
+        for bg in set(bgs):
+            doc_freq[bg] += 1
+
+    results = []
+    for bg, count in doc_freq.items():
+        freq = count / n
+        if count >= MIN_BIGRAM_ABS:  # absolute threshold only — scales across corpus sizes
+            results.append((bg, float(freq), int(count)))
+
+    results.sort(key=lambda x: -x[1])
+    return results[:top_k]
+
+
+def compute_cooccurrence(
+    texts: List[str],
+    tfidf_bigrams: List[tuple],
+    freq_bigrams: List[Tuple[str, float, int]],
+) -> Dict[str, Dict[str, float]]:
+    """
+    For each frequency bigram (used for removal), compute what fraction
+    of the questions containing it also contain each TF-IDF bigram.
+
+    Returns dict: freq_bigram -> {tfidf_bigram -> overlap_pct}
+    Only reports overlaps >= 10%.
+
+    Interpretation: if removing "mamma pappa" takes 40% of "tik tok" questions,
+    those themes are entangled. If overlap is 5%, removal is clean.
+    """
+    if not tfidf_bigrams or not freq_bigrams:
+        return {}
+
+    tfidf_terms = [entry[0] for entry in tfidf_bigrams]
+    freq_terms  = [bg for bg, _, _ in freq_bigrams]
+
+    # Pre-compute bigram sets per document
+    doc_bigram_sets = [set(_tokenize_bigrams(t)) for t in texts]
+
+    result: Dict[str, Dict[str, float]] = {}
+
+    for fb in freq_terms:
+        fb_docs = [i for i, bgs in enumerate(doc_bigram_sets) if fb in bgs]
+        if not fb_docs:
+            continue
+
+        overlaps: Dict[str, float] = {}
+        for tb in tfidf_terms:
+            if tb == fb:
+                continue
+            both = sum(1 for i in fb_docs if tb in doc_bigram_sets[i])
+            pct  = both / len(fb_docs)
+            if pct >= 0.10:
+                overlaps[tb] = round(pct, 3)
+
+        if overlaps:
+            result[fb] = dict(sorted(overlaps.items(), key=lambda x: -x[1]))
+
+    return result
+
+
+def discover_category_cross(
+    texts: List[str],
+    category: str,
+    all_category_texts: Dict[str, List[str]],
+    n_passes: int = N_PASSES,
+) -> List[Dict]:
+    """
+    Iterative residual c-TF-IDF using cross-category IDF for display,
+    frequency-based removal for coverage.
+
+    Each pass:
+    1. Computes cross-category TF-IDF → shows distinctive bigrams (interpretable)
+    2. Computes within-category frequency → removes most common bigrams (coverage)
+
+    This separates the two goals:
+    - What is this topic about?  → answered by TF-IDF bigrams displayed
+    - Which questions to remove? → answered by frequency bigrams removed
+    """
+    cleaned_texts = [_clean_text(t) for t in texts]
+    remaining = list(range(len(cleaned_texts)))
+    results = []
+
+    for pass_num in range(1, n_passes + 1):
+        n_remaining   = len(remaining)
+        pct_remaining = n_remaining / len(cleaned_texts)
+
+        if n_remaining < MIN_QUESTIONS:
+            print(f"    Pass {pass_num}: stopping — only {n_remaining} questions left")
+            break
+
+        pass_texts = [cleaned_texts[i] for i in remaining]
+
+        # --- DISPLAY: cross-category TF-IDF bigrams (distinctive vocabulary) ---
+        cross_ctx           = dict(all_category_texts)
+        cross_ctx[category] = pass_texts
+        cross_results       = compute_ctfidf_bigrams_cross_category(
+            cross_ctx, top_k=TOP_BIGRAMS_SHOWN, min_freq=MIN_BIGRAM_FREQ
+        )
+        tfidf_bigrams = cross_results.get(category, [])
+
+        # --- REMOVAL: top frequency bigrams (maximum coverage) ---
+        freq_bigrams = get_top_freq_bigrams(pass_texts, top_k=TOP_FREQ_REMOVE)
+        remove_bigrams = [b for b, _, _ in freq_bigrams]
+
+        # Fallback: if no bigrams meet frequency threshold, use TF-IDF top bigrams
+        if not remove_bigrams and tfidf_bigrams:
+            remove_bigrams = [b for b, _, _, *_ in tfidf_bigrams[:TOP_BIGRAMS_REMOVE]]
+
+        if not tfidf_bigrams and not remove_bigrams:
+            print(f"    Pass {pass_num}: stopping — no bigrams above threshold")
+            break
+
+        # Compute co-occurrence between TF-IDF and frequency bigrams
+        cooc = compute_cooccurrence(pass_texts, tfidf_bigrams, freq_bigrams)
+
+        results.append({
+            "pass_num":        pass_num,
+            "n_questions":     n_remaining,
+            "pct_remaining":   round(pct_remaining, 3),
+            "bigrams":         tfidf_bigrams,
+            "removed_bigrams": remove_bigrams,
+            "freq_bigrams":    [(b, f, n) for b, f, n in freq_bigrams],
+            "cooccurrence":    cooc,
+        })
+
+        # Print TF-IDF bigrams (what this topic is about)
+        if tfidf_bigrams:
+            print(f"    Pass {pass_num} ({n_remaining:,} q, {pct_remaining:.0%} remaining):")
+            for entry in tfidf_bigrams[:TOP_BIGRAMS_SHOWN]:
+                n_q = entry[3] if len(entry) > 3 else int(entry[2] * n_remaining)
+                print(f"      [tfidf] {entry[0]:<32} {entry[2]*100:>5.1f}%  ({n_q:,} q)")
+        else:
+            print(f"    Pass {pass_num} ({n_remaining:,} q): no distinctive TF-IDF bigrams")
+
+        # Print frequency bigrams (what gets removed)
+        if freq_bigrams:
+            print(f"      Top frequency bigrams (used for removal):")
+            for bg, freq, n_q in freq_bigrams[:TOP_FREQ_REMOVE]:
+                print(f"        [freq] {bg:<32} {freq*100:>5.1f}%  ({n_q:,} q)")
+
+        # Print co-occurrence where meaningful
+        if cooc:
+            print(f"      Co-occurrence (freq bigram → overlapping TF-IDF bigrams):")
+            for fb, overlaps in cooc.items():
+                overlap_str = ", ".join(
+                    f"{tb} ({v*100:.0f}%)" for tb, v in list(overlaps.items())[:3]
+                )
+                print(f"        [{fb}] also contains: {overlap_str}")
+
+        # Remove questions containing the frequency bigrams
+        remove_mask = questions_containing_bigrams(pass_texts, remove_bigrams)
+        n_removed   = int(remove_mask.sum())
+        keep_local  = np.where(~remove_mask)[0]
+        remaining   = [remaining[i] for i in keep_local]
+
+        print(f"      → removed {n_removed:,} questions "
+              f"({n_removed/n_remaining*100:.1f}% of remaining) "
+              f"containing: {', '.join(remove_bigrams[:3])}{'...' if len(remove_bigrams) > 3 else ''}")
+        print()
+
+    return results
+
 
 def discover_category(
     texts: List[str],
@@ -363,7 +639,7 @@ def discover_category(
             print(f"    Pass {pass_num}: stopping — no bigrams above threshold")
             break
 
-        remove_bigrams = [b for b, _, _ in bigrams[:TOP_BIGRAMS_REMOVE]]
+        remove_bigrams = [entry[0] for entry in bigrams[:TOP_BIGRAMS_REMOVE]]
 
         results.append({
             "pass_num": pass_num,
@@ -374,8 +650,8 @@ def discover_category(
         })
 
         print(f"    Pass {pass_num} ({n_remaining:,} q, {pct_remaining:.0%} remaining):")
-        for bigram, score, freq in bigrams[:TOP_BIGRAMS_SHOWN]:
-            print(f"      {bigram:<35} {freq*100:>5.1f}% of questions")
+        for bigram, score, freq, n_q in bigrams[:TOP_BIGRAMS_SHOWN]:
+            print(f"      {bigram:<35} {freq*100:>5.1f}%  ({n_q:,} q)")
 
         # Remove questions containing the top bigrams — using cleaned texts
         remove_mask = questions_containing_bigrams(pass_texts, remove_bigrams)
@@ -413,6 +689,15 @@ def run_discovery(seg_name: str, target_category: str = None) -> None:
     )
     categories = [c for c in categories if c and c != "unknown"]
 
+    # Pre-clean all category texts once for cross-category IDF
+    print(f"\nPre-cleaning texts for {len(categories)} categories...")
+    all_category_texts: Dict[str, List[str]] = {}
+    for cat in categories:
+        cat_df = assign[assign["topic"] == cat]
+        texts  = cat_df["body_norm"].astype(str).tolist()
+        if len(texts) >= MIN_QUESTIONS:
+            all_category_texts[cat] = [_clean_text(t) for t in texts]
+
     all_results: Dict[str, List[Dict]] = {}
 
     for cat in categories:
@@ -426,7 +711,7 @@ def run_discovery(seg_name: str, target_category: str = None) -> None:
             print(f"  Too few questions, skipping.")
             continue
 
-        results = discover_category(texts, cat)
+        results = discover_category_cross(texts, cat, all_category_texts)
         all_results[cat] = results
 
     _write_text_report(all_results, seg_name, seg_dir)
@@ -467,11 +752,13 @@ def _write_text_report(
             row_parts = []
             for p in passes:
                 if row_i < len(p["bigrams"]):
-                    bigram, _, freq = p["bigrams"][row_i]
-                    cell = f"{bigram}  ({freq*100:.1f}%)"
+                    entry  = p["bigrams"][row_i]
+                    bigram, _, freq = entry[0], entry[1], entry[2]
+                    n_q = entry[3] if len(entry) > 3 else ""
+                    cell = f"{bigram}  ({freq*100:.1f}%, {n_q:,} q)" if n_q else f"{bigram}  ({freq*100:.1f}%)"
                 else:
                     cell = ""
-                row_parts.append(f"{cell:<40}")
+                row_parts.append(f"{cell:<45}")
             lines.append("  ".join(row_parts))
 
         lines.append("")
@@ -537,7 +824,8 @@ def _write_excel_report(
             c.fill = HDR_FILL
             c.alignment = Alignment(horizontal="center")
 
-            for cc, label in [(col, "Bigram"), (col + 1, "% questions")]:
+            removed_label = f"Removed: {', '.join(passes[p_idx-1]['removed_bigrams'][:2])}..." if p_idx > 0 and passes[p_idx-1].get('removed_bigrams') else "Pass 1 (full corpus)"
+            for cc, label in [(col, f"TF-IDF bigrams\n({removed_label})"), (col + 1, "% (n questions)")]:
                 cell = ws.cell(row=3, column=cc, value=label)
                 cell.font = Font(bold=True, size=10)
                 cell.fill = PASS_FILLS[p_idx % len(PASS_FILLS)]
@@ -551,10 +839,13 @@ def _write_excel_report(
                 col  = p_idx * 2 + 1
                 fill = PASS_FILLS[p_idx % len(PASS_FILLS)]
                 if row_i < len(p["bigrams"]):
-                    bigram, score, freq = p["bigrams"][row_i]
+                    entry  = p["bigrams"][row_i]
+                    bigram = entry[0]
+                    freq   = entry[2]
+                    n_q    = entry[3] if len(entry) > 3 else None
                     c1 = ws.cell(row=excel_row, column=col,     value=bigram)
-                    c2 = ws.cell(row=excel_row, column=col + 1, value=round(freq * 100, 1))
-                    c2.number_format = '0.0"%"'
+                    pct_label = f"{round(freq*100, 1)}% ({n_q:,})" if n_q else f"{round(freq*100, 1)}%"
+                    c2 = ws.cell(row=excel_row, column=col + 1, value=pct_label)
                     for c in [c1, c2]:
                         c.fill = fill
                         c.border = border
@@ -562,6 +853,39 @@ def _write_excel_report(
                 else:
                     for cc in [col, col + 1]:
                         ws.cell(row=excel_row, column=cc).fill = fill
+
+        # Co-occurrence sections (appended below data rows per pass)
+        base_cooc_row = max_rows + 4 + 1  # one row below the last data row
+        for p_idx, p in enumerate(passes):
+            p_cooc = p.get("cooccurrence", {})
+            if not p_cooc:
+                continue
+            col  = p_idx * 2 + 1
+            fill = PASS_FILLS[p_idx % len(PASS_FILLS)]
+            next_row = base_cooc_row
+            cooc_label = ws.cell(
+                row=next_row, column=col,
+                value="Co-occurrence (freq → TF-IDF)"
+            )
+            cooc_label.font = Font(italic=True, size=10, color="888780")
+            cooc_label.fill = fill
+            next_row += 1
+            for fb, overlaps in list(p_cooc.items())[:3]:
+                overlap_str = ", ".join(
+                    f"{tb} {v*100:.0f}%"
+                    for tb, v in list(overlaps.items())[:2]
+                )
+                cooc_cell = ws.cell(
+                    row=next_row, column=col,
+                    value=f"{fb} → {overlap_str}"
+                )
+                cooc_cell.font = Font(italic=True, size=10)
+                cooc_cell.fill = fill
+                ws.merge_cells(
+                    start_row=next_row, start_column=col,
+                    end_row=next_row, end_column=col + 1
+                )
+                next_row += 1
 
         # Column widths
         for p_idx in range(len(passes)):

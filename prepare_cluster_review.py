@@ -518,6 +518,23 @@ def write_consolidated_excel(
         except Exception as exc:
             print(f"[warn] Could not load guided_topic_cluster_map.json: {exc}")
 
+    # ── Build label_map from clustering_run_params.json ────────────────────────
+    # Guided topics occupy IDs 0..len(guided_topic_labels)-1 in JSON order.
+    # Data-driven clusters get a "cluster_N" fallback.
+    label_map: dict[int, str] = {}
+    params_path = seg_dir / "clustering_run_params.json"
+    if params_path.exists():
+        try:
+            params = json.loads(params_path.read_text(encoding="utf-8"))
+            guided = params.get("guided_topic_labels", [])
+            n_clus = params.get("n_clusters", 0)
+            label_map = {i: lbl for i, lbl in enumerate(guided)}
+            for i in range(n_clus):
+                if i not in label_map:
+                    label_map[i] = f"cluster_{i}"
+        except Exception as exc:
+            print(f"[warn] Could not load clustering_run_params.json: {exc}")
+
     def _sheet_name(cid: int) -> str:
         if cid in topic_map:
             label = topic_map[cid]["label"]
@@ -525,6 +542,10 @@ def write_consolidated_excel(
             short = label[:20] if len(label) > 20 else label
             suffix = "" if quality == "strong" else "~"
             return f"{short}{suffix} ({cid})"
+        if cid in label_map:
+            import re
+            safe = re.sub(r'[/\\?*\[\]:]', '-', label_map[cid])[:28]
+            return f"{safe} ({cid})"
         return f"cluster_{cid}"
 
     # Build per-cluster fuzzy lookup

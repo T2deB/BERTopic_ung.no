@@ -55,7 +55,7 @@ LATE_ROWS_FILE = "late_arrivals_body_norm.csv"
 GUIDED_TOPICS_FILES = {
     "boys_13_15":  "guided_topics_boys_13_15.json",
     "boys_16_20":  "guided_topics_boys_16_20.json",
-    "girls_13_15": "guided_topics_girls_13_15.json",
+    "girls_13_15": "guided_topics_girls_13_15_v2.json",
     "girls_16_20": "guided_topics_girls_16_20.json",
     "_default":    "guided_topics.json",
 }
@@ -96,10 +96,7 @@ SEGMENT_OUTPUT_SUBDIR = "segments"
 
 # NOTE: if exact age column is missing, 13-15 is approximated using age_group == "13-16"
 SEGMENTS = [
-    {"name": "boys_13_15", "gender": "m", "age_min": 13, "age_max": 15},
-    {"name": "boys_16_20", "gender": "m", "age_min": 16, "age_max": 20},
     {"name": "girls_13_15", "gender": "k", "age_min": 13, "age_max": 15},
-    {"name": "girls_16_20", "gender": "k", "age_min": 16, "age_max": 20},
 ]
 
 # Sampling
@@ -1178,6 +1175,7 @@ def run_one_segment(
     bertopic_count: int = 0              # set in guided path; 0 means non-guided run
     base_clusters:  int = 0
     guided_headroom: int = 0
+    label_map: dict = {}                 # cluster_id → human label; built in fuzzy path
     formula_count:  int = 0
 
     if USE_FUZZY_BERTOPIC:
@@ -1185,6 +1183,19 @@ def run_one_segment(
             # Run guided BERTopic to discover cluster structure
             guided_labels = cluster_with_bertopic_guided(sample_texts, sample_embs, seed_topic_list, hdbscan_params)
             bertopic_count = int(len(set(guided_labels[guided_labels >= 0])))
+
+            # Map cluster IDs to human-readable labels.
+            # Guided topics occupy IDs 0..len(seed_labels)-1 in the same order as the JSON.
+            # Data-driven clusters get a "cluster_N" fallback label.
+            def build_label_map(n_clusters: int, guided_labels_list: list) -> dict:
+                lmap = {}
+                for i, lbl in enumerate(guided_labels_list):
+                    lmap[i] = lbl
+                for i in range(n_clusters):
+                    if i not in lmap:
+                        lmap[i] = f"cluster_{i}"
+                lmap[-1] = "unassigned"
+                return lmap
 
             # Data-driven formula: base on corpus size + guided topic density
             n_guided = len(seed_labels)
@@ -1217,6 +1228,8 @@ def run_one_segment(
             n_fuzzy_clusters = formula_count
             print(f"[segment:{seg_name}] no guided topics; formula n_fuzzy_clusters={n_fuzzy_clusters}")
             mode = "fuzzy_bertopic"
+
+        label_map = build_label_map(n_fuzzy_clusters, seed_labels)
 
         # Attempt A — full-corpus fit (only when segment exceeds sample cap)
         full_fit_succeeded = False
@@ -1294,6 +1307,9 @@ def run_one_segment(
         matrix_path = outdir / "fuzzy_membership_matrix.npz"
         np.savez_compressed(matrix_path, membership=full_membership.astype(np.float32))
         print(f"[{seg_name}] full membership matrix saved: shape={full_membership.shape}")
+
+    if label_map:
+        out_assign["cluster_label"] = out_assign["cluster_id"].map(label_map).fillna("unassigned")
 
     out_assign = normalize_export_dtypes(out_assign)
 
@@ -1378,6 +1394,13 @@ def run_one_segment(
         coherence_df[["cluster_id", "centroid_sim_mean", "centroid_sim_std", "intra_sim_mean"]],
         on="cluster_id", how="left",
     )
+    if label_map:
+        catalog_df["cluster_label"] = catalog_df["cluster_id"].map(label_map).fillna(
+            catalog_df["cluster_id"].apply(lambda x: f"cluster_{x}")
+        )
+        cols = catalog_df.columns.tolist()
+        cols.insert(1, cols.pop(cols.index("cluster_label")))
+        catalog_df = catalog_df[cols]
     catalog_df.to_csv(outdir / "clusters_catalog.csv", index=False, encoding="utf-8")
 
     # Guided topic → cluster mapping
