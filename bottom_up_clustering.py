@@ -45,7 +45,7 @@ SCRIPT_DIR = Path(__file__).parent   # folder containing the .py files (tracked 
 DATA_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\data"
 OUTPUT_DIR = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\outputs"
 SHARD_PREFIX = "bodynorm"
-A_EMB_FILE = "A_embeddings.npz"
+A_EMB_FILE = r"C:\Users\TorsteinDeBesche\NIFU\21571 Folkehelse og livsmestring - General\Ap2c Informasjonskanal for unge\Positron_project\outputs\embeddings\nb-bert\A_embeddings.npz"
 A_INDEX_FILE = "C_candidates_index.parquet"
 AGE_LOOKUP_FILE = "C_index.parquet"   # optional; provides exact numeric age column
 LATE_ROWS_FILE = "late_arrivals_body_norm.csv"
@@ -72,6 +72,7 @@ FUZZY_FORMULA_MIN_CLUSTERS     = 40
 FUZZY_FORMULA_MAX_CLUSTERS     = 200
 FUZZY_FORMULA_GUIDED_FACTOR    = 1.5   # extra headroom per guided topic
 
+EMBEDDING_MODEL_ID = "NbAiLab/nb-sbert-base"
 
 def get_hdbscan_params(n_docs: int) -> dict:
     """Compute data-driven HDBSCAN parameters based on corpus size.
@@ -153,7 +154,7 @@ def strip_greeting(t: str) -> str:
 
 
 def load_all_embeddings(outdir: Path, shard_prefix: str) -> np.ndarray:
-    a_npz = outdir / A_EMB_FILE
+    a_npz = Path(A_EMB_FILE)
     if a_npz.exists():
         return np.load(a_npz)["embs"].astype("float32")
 
@@ -759,8 +760,8 @@ def fuzzy_term_importance(
     if embedding_model is None:
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
-            embedding_model = SentenceTransformer("Alibaba-NLP/gte-multilingual-base")
-            print("[fuzzy_ti] loaded SentenceTransformer(gte-multilingual-base)")
+            embedding_model = SentenceTransformer(EMBEDDING_MODEL_ID)
+            print(f"[fuzzy_ti] loaded SentenceTransformer({EMBEDDING_MODEL_ID})")
         except Exception as exc:
             warnings.warn(
                 f"[fuzzy_term_importance] cannot load embedding model: {exc}. "
@@ -885,9 +886,9 @@ def fuzzy_term_importance(
 
     # TI matrix diagnostics
     ti_nonzero_per_cluster = (ti_matrix > 0.0).sum(axis=0)  # (n_clusters,)
+    _min_nz = f"{ti_matrix[ti_matrix > 0].min():.6f}" if (ti_matrix > 0).any() else "N/A"
     print(f"[fuzzy_ti] TI matrix shape={ti_matrix.shape}, "
-          f"global max={ti_matrix.max():.4f}, global min_nonzero="
-          f"{ti_matrix[ti_matrix > 0].min():.6f if (ti_matrix > 0).any() else 'N/A'}")
+          f"global max={ti_matrix.max():.4f}, global min_nonzero={_min_nz}")
     print(f"[fuzzy_ti] non-zero TI tokens per cluster: "
           f"min={int(ti_nonzero_per_cluster.min())}, "
           f"max={int(ti_nonzero_per_cluster.max())}, "

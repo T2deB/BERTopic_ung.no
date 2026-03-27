@@ -1,8 +1,22 @@
 Project handover notes (BERTopic_ung.no)
 ======================================
 
-Current project status (2026-03-12)
+Current project status (2026-03-27)
 ------------------------------------
+0) Embedding model confirmed: NbAiLab/nb-sbert-base
+   - generate_embeddings.py uses nb-sbert-base (NorBERT from NbAiLab)
+   - Successfully generated embeddings for all four segments
+   - Fuzzy BERTopic clustering ran successfully on girls_13_15 using these embeddings
+
+0b) Next step: subclustering for labelling
+   - subcluster_parent_topics.py runs subclustering within each large cluster
+   - Purpose: large/diffuse clusters are hard to label directly; subclustering
+     reveals internal structure and makes human labelling more tractable
+   - Run: python subcluster_parent_topics.py --segment girls_13_15
+   - Output: nested_topics/ folder per segment with subcluster_assignments.parquet
+     and per-parent-cluster subfolders
+
+
 1) Fuzzy BERTopic mode has been fully implemented and run
    - bottom_up_clustering.py now uses Fuzzy c-means instead of HDBSCAN
    - USE_FUZZY_BERTOPIC = True (default)

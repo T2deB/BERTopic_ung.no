@@ -71,7 +71,9 @@ def compute_prevalence(membership: np.ndarray, n_clusters: int, guided_labels: l
     prevalence = weighted_sum / n_docs
 
     rows = []
-    for cid in range(min(n_clusters, membership.shape[1])):
+    # Restrict analysis to guided topics only — data-driven clusters are noise
+    n_guided = len(guided_labels)
+    for cid in range(min(n_guided, membership.shape[1])):
         label = guided_labels[cid] if cid < len(guided_labels) else f"cluster_{cid}"
         rows.append({
             "cluster_id": cid,
@@ -100,7 +102,9 @@ def compute_cooccurrence(membership: np.ndarray, n_clusters: int, guided_labels:
     Only reports pairs where at least one cluster is a guided topic.
     Sorted by co-occurrence strength descending.
     """
-    n_c = min(n_clusters, membership.shape[1])
+    # Restrict analysis to guided topics only — data-driven clusters are noise
+    n_guided = len(guided_labels)
+    n_c = min(n_guided, membership.shape[1])
     rows = []
 
     for i in range(n_c):
@@ -109,9 +113,23 @@ def compute_cooccurrence(membership: np.ndarray, n_clusters: int, guided_labels:
             if i >= len(guided_labels) and j >= len(guided_labels):
                 continue
 
-            co = float(np.minimum(membership[:, i], membership[:, j]).mean())
+            ACTIVATION_THRESHOLD = 0.05  # both topics must exceed this to count
+            active = (membership[:, i] > ACTIVATION_THRESHOLD) & \
+                     (membership[:, j] > ACTIVATION_THRESHOLD)
+            if active.sum() < 5:
+                continue
+
+            co = float(np.minimum(membership[active, i], membership[active, j]).mean())
             if co < 0.001:
                 continue
+
+            # Lift: observed / expected under independence
+            # Values > 1 mean topics co-occur more than chance; < 1 means less
+            # Compute expected on same active subset for consistency
+            prev_a = float(membership[active, i].mean())
+            prev_b = float(membership[active, j].mean())
+            expected = prev_a * prev_b
+            lift = round(co / expected, 3) if expected > 0 else None
 
             label_i = guided_labels[i] if i < len(guided_labels) else f"cluster_{i}"
             label_j = guided_labels[j] if j < len(guided_labels) else f"cluster_{j}"
@@ -121,14 +139,40 @@ def compute_cooccurrence(membership: np.ndarray, n_clusters: int, guided_labels:
                 "cluster_b": j,
                 "label_b": label_j,
                 "cooccurrence_score": round(co, 6),
+                "lift": lift,
+                "n_co_active": int(active.sum()),
                 "both_guided": i < len(guided_labels) and j < len(guided_labels),
             })
 
-    return (
-        pd.DataFrame(rows)
-        .sort_values("cooccurrence_score", ascending=False)
-        .reset_index(drop=True)
-    )
+    df = pd.DataFrame(rows)
+    # Sort by lift for reporting (suppresses spurious common-topic pairs)
+    # cooccurrence_score column retained for reference
+    return df.sort_values("lift", ascending=False).reset_index(drop=True)
+
+
+def compute_coverage_summary(
+    membership: np.ndarray,
+    guided_labels: list,
+    seg_name: str,
+) -> pd.DataFrame:
+    """
+    Document-level coverage: sum of membership across guided topics per document.
+    High coverage = question is well-represented by the guided ontology.
+    Low coverage = question content falls outside the defined topics.
+    """
+    n_guided = len(guided_labels)
+    guided_membership = membership[:, :min(n_guided, membership.shape[1])]
+    coverage_scores = guided_membership.sum(axis=1)  # (n_docs,)
+    mean_coverage = float(coverage_scores.mean())
+    pct_well_covered = float((coverage_scores > 0.5).mean())
+    return pd.DataFrame([{
+        "segment": seg_name,
+        "n_guided_topics": n_guided,
+        "n_docs": len(coverage_scores),
+        "mean_coverage_score": round(mean_coverage, 4),
+        "pct_well_covered": round(pct_well_covered * 100, 2),
+        "pct_coverage_gt_0.3": round(float((coverage_scores > 0.3).mean()) * 100, 2),
+    }])
 
 
 def compute_topic_profiles(
@@ -147,7 +191,9 @@ def compute_topic_profiles(
     n_docs = membership.shape[0]
     rows = []
 
-    for cid in range(min(n_clusters, membership.shape[1])):
+    # Restrict analysis to guided topics only — data-driven clusters are noise
+    n_guided = len(guided_labels)
+    for cid in range(min(n_guided, membership.shape[1])):
         label = guided_labels[cid] if cid < len(guided_labels) else f"cluster_{cid}"
         col = membership[:, cid]
 
@@ -219,6 +265,16 @@ def run_segment(seg_name: str, base: Path):
     profiles_df.to_csv(out3, index=False, encoding="utf-8")
     print(f"  Topic profiles written: {out3.name}")
 
+    # 4. Coverage summary
+    coverage_df = compute_coverage_summary(membership, guided_labels, seg_name)
+    out4 = seg_dir / "fuzzy_coverage_summary.csv"
+    coverage_df.to_csv(out4, index=False, encoding="utf-8")
+    cov_row = coverage_df.iloc[0]
+    print(f"  Coverage: mean={cov_row['mean_coverage_score']:.3f}, "
+          f"well_covered(>0.5)={cov_row['pct_well_covered']:.1f}%")
+
+    return coverage_df
+
 
 def main():
     parser = argparse.ArgumentParser(description="Fuzzy membership analysis per segment.")
@@ -228,13 +284,23 @@ def main():
     base = Path(OUTPUT_DIR)
     segs = SEGMENTS if args.segment == "all" else [args.segment]
 
+    coverage_parts = []
     for seg in segs:
         try:
-            run_segment(seg, base)
+            cov = run_segment(seg, base)
+            if cov is not None:
+                coverage_parts.append(cov)
         except Exception as e:
             print(f"ERROR in {seg}: {e}")
             import traceback
             traceback.print_exc()
+
+    if coverage_parts:
+        combined = pd.concat(coverage_parts, ignore_index=True)
+        out_cov = base / "fuzzy_coverage_summary.csv"
+        combined.to_csv(out_cov, index=False, encoding="utf-8")
+        print(f"\n  Combined coverage summary written: {out_cov}")
+        print(combined.to_string(index=False))
 
     print("\n[done] fuzzy_analysis.py completed")
 
